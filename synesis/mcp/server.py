@@ -13,6 +13,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from synesis.agent.learner import append_learning, generate_index
 from synesis.sync import SyncEngine
 
 PROJECT_DIR = Path(os.environ.get("SYNESIS_DIR", os.path.expanduser("~/synesis-data")))
@@ -180,10 +181,30 @@ def write_file(path: str, content: str) -> str:
 
 
 @mcp.tool()
+def orient() -> str:
+    """Call this first when connecting. Returns a summary of what's in the knowledge base
+    so you can orient quickly without scanning the whole directory."""
+    index_path = KB_DIR / "_agent" / "index.md"
+    if index_path.exists():
+        return index_path.read_text(encoding="utf-8")
+    # Generate if it doesn't exist yet
+    return generate_index(KB_DIR)
+
+
+@mcp.tool()
+def learn(rule: str) -> str:
+    """Record something you've learned about the user or their preferences.
+    This gets appended to the agent rules file for future sessions.
+    Example: learn('user prefers concise responses over detailed ones')"""
+    return append_learning(KB_DIR, rule)
+
+
+@mcp.tool()
 def sync() -> str:
     """Trigger a sync cycle to pull new data from connected sources."""
     engine = SyncEngine(str(PROJECT_DIR))
     result = engine.run()
+    generate_index(KB_DIR)
     return f"Synced: {result['entries']} files written."
 
 

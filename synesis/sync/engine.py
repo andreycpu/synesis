@@ -5,7 +5,9 @@ it with grep, cat, tree - tools they already know.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -22,11 +24,13 @@ class SyncEngine:
         self.config_manager = ConfigManager(project_dir / "config" / "synesis.yaml")
         self.data_dir = project_dir / "knowledge"
         self.state_file = project_dir / ".sync-state.json"
+        self.manifest_file = project_dir / ".sync-manifest.json"
 
     def run(self) -> dict:
         config = self.config_manager.load()
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+        manifest = self._load_manifest()
         last_sync = self._get_last_sync()
         print(f"Synesis sync starting... (since: {last_sync or 'beginning'})")
 
@@ -58,24 +62,44 @@ class SyncEngine:
         # Write conversations as browsable files - no LLM, just raw data
         written = 0
         for conv in all_conversations:
-            path = self._write_conversation(conv)
+            path = self._write_conversation(conv, manifest)
             if path:
                 written += 1
                 print(f"  + {path.relative_to(self.data_dir)}")
 
+        self._save_manifest(manifest)
         self._save_last_sync()
+
+        # Generate agent index after sync
+        self._generate_agent_index()
+
         print(f"Sync complete: {written} files written")
 
         return {"entries": written, "config_updates": []}
 
-    def _write_conversation(self, conv: RawConversation) -> Path | None:
-        """Write a conversation as a markdown file, organized by source."""
+    def _content_hash(self, conv: RawConversation) -> str:
+        """SHA256 hash of the conversation message content."""
+        h = hashlib.sha256()
+        for msg in conv.messages:
+            h.update(msg.role.encode("utf-8"))
+            h.update(msg.content.encode("utf-8"))
+        return h.hexdigest()
+
+    def _write_conversation(self, conv: RawConversation, manifest: dict) -> Path | None:
+        """Write a conversation as a markdown file, organized by source.
+        Skips if content hash already exists in manifest."""
         source_dir = self.data_dir / conv.source
         source_dir.mkdir(parents=True, exist_ok=True)
 
         # Clean up the ID for use as filename
         filename = re.sub(r"[^a-zA-Z0-9_-]", "-", conv.id)[:80] + ".md"
         file_path = source_dir / filename
+        rel_path = str(file_path.relative_to(self.project_dir))
+
+        # Deduplication: hash content and skip if unchanged
+        content_hash = self._content_hash(conv)
+        if rel_path in manifest and manifest[rel_path].get("hash") == content_hash:
+            return None
 
         # Build markdown content
         lines = []
@@ -102,7 +126,32 @@ class SyncEngine:
             lines.append("")
 
         file_path.write_text("\n".join(lines), encoding="utf-8")
+
+        # Update manifest with hash and mtime
+        manifest[rel_path] = {
+            "hash": content_hash,
+            "mtime": os.path.getmtime(file_path),
+        }
+
         return file_path
+
+    def _load_manifest(self) -> dict:
+        if not self.manifest_file.exists():
+            return {}
+        try:
+            return json.loads(self.manifest_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_manifest(self, manifest: dict) -> None:
+        self.manifest_file.write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+
+    def _generate_agent_index(self) -> None:
+        """Generate _agent/index.md with filesystem stats - no LLM needed."""
+        from synesis.agent.learner import generate_index
+        generate_index(self.data_dir)
 
     def _get_last_sync(self) -> str | None:
         if not self.state_file.exists():
