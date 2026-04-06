@@ -6,26 +6,40 @@ import path from "path";
 import { KnowledgeStore } from "../kb/store.js";
 import { ConfigManager } from "../config/index.js";
 import { SyncEngine } from "../sync/index.js";
+import { SearchIndex } from "../kb/search.js";
+import { Compactor } from "../kb/compactor.js";
 
 const PROJECT_DIR = process.env.SYNESIS_DIR || process.cwd();
 const store = new KnowledgeStore(path.join(PROJECT_DIR, "knowledge"));
 const configManager = new ConfigManager(
   path.join(PROJECT_DIR, "config", "synesis.yaml")
 );
+const searchIndex = new SearchIndex();
+let indexLoaded = false;
+
+async function ensureIndex() {
+  if (indexLoaded) return;
+  await store.init();
+  const entries = await store.list();
+  for (const entry of entries) {
+    searchIndex.add(entry);
+  }
+  indexLoaded = true;
+}
 
 const server = new McpServer({
   name: "synesis",
   version: "0.1.0",
 });
 
-// Search knowledge base
+// Search knowledge base (TF-IDF ranked)
 server.tool(
   "search",
-  "Search the knowledge base for entries matching a query",
-  { query: z.string(), category: z.string().optional() },
-  async ({ query, category }) => {
-    await store.init();
-    const results = await store.search(query, category);
+  "Search the knowledge base for entries matching a query. Returns ranked results.",
+  { query: z.string(), category: z.string().optional(), limit: z.number().optional() },
+  async ({ query, category, limit }) => {
+    await ensureIndex();
+    const results = searchIndex.search(query, limit || 10, category);
     const text = results.length === 0
       ? "No results found."
       : results
@@ -36,6 +50,64 @@ server.tool(
           .join("\n\n---\n\n");
 
     return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+// Context-aware retrieval - fits results within a token budget
+server.tool(
+  "context",
+  "Get relevant knowledge entries that fit within a token budget. Use this instead of search when you need to load knowledge into your context window efficiently.",
+  { query: z.string(), max_tokens: z.number().optional(), category: z.string().optional() },
+  async ({ query, max_tokens, category }) => {
+    await ensureIndex();
+    const entries = searchIndex.getContext(query, max_tokens || 8000, category);
+    const text = entries.length === 0
+      ? "No relevant knowledge found."
+      : `*${entries.length} entries loaded (~${Math.ceil(entries.reduce((sum, e) => sum + (e.title.length + e.content.length) / 4, 0))} tokens)*\n\n` +
+        entries
+          .map((e) => `## ${e.title} [${e.category}]\n${e.content}`)
+          .join("\n\n---\n\n");
+
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+// Compact knowledge base - merge related entries to reduce bloat
+server.tool(
+  "compact",
+  "Run compaction to merge related entries and reduce knowledge base size. Use when the KB grows too large.",
+  { max_per_category: z.number().optional() },
+  async ({ max_per_category }) => {
+    const compactor = new Compactor(store);
+    const result = await compactor.compact(max_per_category || 50);
+    const text = result.merged === 0
+      ? "No compaction needed - all categories are within threshold."
+      : `Compacted: ${result.merged} merge operations, ${result.archived} entries archived.\n` +
+        result.categories
+          .map((c) => `  ${c.category}: merged ${c.merged} groups, archived ${c.archived} entries`)
+          .join("\n");
+
+    // Rebuild search index after compaction
+    indexLoaded = false;
+
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+// Get category summaries for quick orientation
+server.tool(
+  "summarize",
+  "Generate a concise summary of a knowledge category. Use for quick orientation without loading all entries.",
+  { category: z.string() },
+  async ({ category }) => {
+    const compactor = new Compactor(store);
+    const summary = await compactor.summarizeCategory(category);
+    if (!summary) {
+      return { content: [{ type: "text" as const, text: `No entries in category: ${category}` }] };
+    }
+    // Save the summary for future quick access
+    await store.write(summary);
+    return { content: [{ type: "text" as const, text: summary.content }] };
   }
 );
 

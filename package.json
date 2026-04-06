@@ -19,14 +19,17 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^12.8.0",
     "chokidar": "^4.0.3",
     "commander": "^13.1.0",
     "croner": "^9.0.0",
     "fast-glob": "^3.3.3",
     "gray-matter": "^4.0.3",
+    "vectra": "^0.14.0",
     "yaml": "^2.7.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",

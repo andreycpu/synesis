@@ -5,6 +5,7 @@ import { SyncEngine } from "./sync/index.js";
 import { KnowledgeStore } from "./kb/store.js";
 import { ConfigManager } from "./config/index.js";
 import { Cron } from "croner";
+import { Compactor } from "./kb/compactor.js";
 import { OAuthManager } from "./auth/oauth.js";
 import { getProvider, listProviders } from "./auth/providers.js";
 
@@ -118,6 +119,25 @@ program
     console.log(`  Knowledge base: ${path.join(PROJECT_DIR, "knowledge")}`);
     console.log(`  Config: ${path.join(PROJECT_DIR, "config", "synesis.yaml")}`);
     console.log(`\nRun 'synesis sync' to start extracting knowledge.`);
+  });
+
+program
+  .command("compact")
+  .description("Merge related entries to reduce knowledge base size")
+  .option("-t, --threshold <number>", "Max entries per category before compaction", "50")
+  .action(async (opts: { threshold: string }) => {
+    const store = new KnowledgeStore(path.join(PROJECT_DIR, "knowledge"));
+    const compactor = new Compactor(store);
+    const result = await compactor.compact(parseInt(opts.threshold));
+
+    if (result.merged === 0) {
+      console.log("No compaction needed.");
+    } else {
+      console.log(`Compacted: ${result.merged} merges, ${result.archived} entries archived`);
+      for (const c of result.categories) {
+        console.log(`  ${c.category}: ${c.merged} groups merged, ${c.archived} entries archived`);
+      }
+    }
   });
 
 const auth = program

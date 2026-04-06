@@ -2,6 +2,7 @@ import { KnowledgeStore } from "../kb/store.js";
 import { ConfigManager } from "../config/index.js";
 import { Extractor } from "../extractor/index.js";
 import { createConnector } from "../connectors/index.js";
+import { Compactor } from "../kb/compactor.js";
 import type { RawConversation } from "../kb/types.js";
 import fs from "fs/promises";
 import path from "path";
@@ -81,6 +82,13 @@ export class SyncEngine {
       for (const a of results) {
         console.log(`  ~ ${a}`);
       }
+    }
+
+    // Run compaction to prevent bloat
+    const compactor = new Compactor(this.store);
+    const compactionResult = await compactor.compact(50);
+    if (compactionResult.merged > 0) {
+      console.log(`Compacted: ${compactionResult.merged} merges, ${compactionResult.archived} entries archived`);
     }
 
     await this.saveLastSync();
