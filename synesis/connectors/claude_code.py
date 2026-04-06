@@ -72,7 +72,7 @@ class ClaudeCodeConnector(BaseConnector):
                 continue
             try:
                 msg = json.loads(line)
-                if msg.get("type") not in ("human", "assistant"):
+                if msg.get("type") not in ("user", "assistant"):
                     continue
 
                 content = msg.get("message", {}).get("content", "")
@@ -84,7 +84,7 @@ class ClaudeCodeConnector(BaseConnector):
                 if content:
                     messages.append(
                         ConversationMessage(
-                            role="user" if msg["type"] == "human" else "assistant",
+                            role=msg["type"],  # "user" or "assistant"
                             content=content,
                             timestamp=msg.get("timestamp"),
                         )
