@@ -1,0 +1,36 @@
+[project]
+name = "synesis"
+version = "0.1.0"
+description = "Self-evolving agent memory system. File-based, MCP-accessible knowledge base that learns and rewrites itself."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.39.0",
+    "mcp[cli]>=1.9.0",
+    "httpx>=0.28.0",
+    "pyyaml>=6.0",
+    "python-frontmatter>=1.1.0",
+    "click>=8.1.0",
+    "croniter>=5.0.0",
+    "watchdog>=6.0.0",
+    "cryptography>=44.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+synesis = "synesis.cli:cli"
+synesis-mcp = "synesis.mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
