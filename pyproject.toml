@@ -15,6 +15,9 @@ dependencies = [
     "croniter>=5.0.0",
     "watchdog>=6.0.0",
     "cryptography>=44.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "jinja2>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +30,7 @@ dev = [
 [project.scripts]
 synesis = "synesis.cli:cli"
 synesis-mcp = "synesis.mcp.server:main"
+synesis-web = "synesis.web.app:main"
 
 [build-system]
 requires = ["hatchling"]

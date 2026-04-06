@@ -25,6 +25,15 @@ def cli():
 
 
 @cli.command()
+@click.option("-p", "--port", default=3000, help="Port to run on")
+def web(port: int):
+    """Launch the Synesis web UI."""
+    from synesis.web.app import main as run_web
+    os.environ["SYNESIS_PORT"] = str(port)
+    run_web()
+
+
+@cli.command()
 def init():
     """Initialize a new Synesis knowledge base."""
     store = KnowledgeStore(PROJECT_DIR / "knowledge")
