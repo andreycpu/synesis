@@ -118,33 +118,34 @@ All config changes are git-tracked, so you have a full audit trail.
 # Clone and install
 git clone https://github.com/andreycpu/synesis.git
 cd synesis
-npm install
-npm run build
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
 
 # Initialize the knowledge base
-npx synesis init
+synesis init
 
 # Run your first sync (ingests Claude Code conversations)
-ANTHROPIC_API_KEY=sk-... npx synesis sync
+ANTHROPIC_API_KEY=sk-... synesis sync
 
 # Search your knowledge
-npx synesis search "project strategy"
+synesis search "project strategy"
 
 # Run as a daemon (syncs every 12 hours by default)
-ANTHROPIC_API_KEY=sk-... npx synesis daemon
+ANTHROPIC_API_KEY=sk-... synesis daemon
 ```
 
 ### Authenticate with OAuth services
 
 ```bash
 # Gmail
-npx synesis auth login google --client-id YOUR_ID --client-secret YOUR_SECRET
+synesis auth login google --client-id YOUR_ID --client-secret YOUR_SECRET
 
 # View authenticated providers
-npx synesis auth list
+synesis auth list
 
 # Revoke access
-npx synesis auth revoke google
+synesis auth revoke google
 ```
 
 ### Connect via MCP
@@ -155,8 +156,7 @@ Add to `~/.claude.json`:
 {
   "mcpServers": {
     "synesis": {
-      "command": "node",
-      "args": ["/path/to/synesis/dist/mcp/server.js"],
+      "command": "/path/to/synesis/.venv/bin/synesis-mcp",
       "env": {
         "SYNESIS_DIR": "/path/to/synesis",
         "ANTHROPIC_API_KEY": "sk-..."
@@ -185,46 +185,54 @@ synesis/
     ideas/
     _archive/              # compacted originals
     _summaries/            # category summaries
-  src/
-    auth/                  # OAuth infrastructure
-      oauth.ts             # PKCE flow, token refresh
-      store.ts             # encrypted token storage
-      providers.ts         # provider templates
-    connectors/            # source plugins
-      claude-code.ts       # local file reader
-      chatgpt.ts           # JSON export parser
-      claude-ai.ts         # JSON export parser
-      gmail.ts             # OAuth + Gmail API
-    extractor/             # LLM knowledge extraction
+  synesis/                 # Python package
+    auth/
+      oauth.py             # PKCE flow, token refresh
+      store.py             # encrypted token storage (Fernet)
+      providers.py         # provider templates
+    connectors/
+      claude_code.py       # local file reader
+      chatgpt.py           # JSON export parser
+      claude_ai.py         # JSON export parser
+      gmail.py             # OAuth + Gmail API
+    extractor/
+      extractor.py         # LLM knowledge extraction
     kb/
-      store.ts             # markdown file CRUD
-      search.ts            # TF-IDF search index
-      compactor.ts         # hierarchical summarization
-    config/                # self-modification engine
-    sync/                  # orchestration
-    mcp/                   # MCP server
-    cli.ts                 # CLI interface
+      store.py             # markdown file CRUD
+      search.py            # TF-IDF search index
+      compactor.py         # hierarchical summarization
+      types.py             # data classes
+    config/
+      manager.py           # self-modification engine
+    sync/
+      engine.py            # orchestration
+    mcp/
+      server.py            # FastMCP server
+    cli.py                 # Click CLI
 ```
 
 ## Adding a connector
 
-Extend `BaseConnector` and register it in `src/connectors/index.ts`:
+Extend `BaseConnector` and register it in `synesis/connectors/__init__.py`:
 
-```typescript
-export class MyConnector extends BaseConnector {
-  name = "my_service";
+```python
+from synesis.connectors.base import BaseConnector
+from synesis.kb.types import RawConversation
 
-  async validate(): Promise<boolean> {
-    // Check if the source is accessible
-  }
 
-  async fetch(since?: Date): Promise<RawConversation[]> {
-    // Pull conversations since the given date
-  }
-}
+class MyConnector(BaseConnector):
+    name = "my_service"
+
+    def validate(self) -> bool:
+        # Check if the source is accessible
+        ...
+
+    def fetch(self, since: str | None = None) -> list[RawConversation]:
+        # Pull conversations since the given date
+        ...
 ```
 
-For OAuth-backed connectors, add a provider template in `src/auth/providers.ts` and use `OAuthManager` to handle authentication.
+For OAuth-backed connectors, add a provider template in `synesis/auth/providers.py` and use `OAuthManager` to handle authentication.
 
 ## Configuration
 
