@@ -1,61 +1,54 @@
 # Synesis
 
-A self-evolving agent memory system. Connect all your AI tools, conversations, and services into a single knowledge base that any agent can access. The system extracts structured knowledge, compresses it to stay within context limits, and autonomously rewrites its own configuration as it learns about you.
+A self-evolving agent memory system that runs locally on your machine. Install it, start it, forget about it. The agent watches your AI conversations, extracts what matters, compresses it to prevent context bloat, and serves it to any AI tool via MCP.
 
-Everything is stored as plain markdown files. Fully observable, fully git-trackable. No black boxes.
+No cloud. No manual syncing. No databases. Just markdown files on your disk that the agent manages autonomously.
 
 ---
 
-## How it works
+## Install and run
 
-Synesis operates as a continuous loop with five stages:
-
-```
-  Ingest          Extract          Store          Compress          Serve
-┌─────────┐    ┌──────────┐    ┌──────────┐    ┌───────────┐    ┌─────────┐
-│ Connect  │───>│ LLM pass │───>│ Markdown │───>│ Compactor │───>│  MCP    │
-│ to your  │    │ pulls    │    │ files w/ │    │ merges    │    │ server  │
-│ sources  │    │ facts,   │    │ YAML     │    │ related   │    │ returns │
-│ via OAuth│    │ decisions│    │ front-   │    │ entries,  │    │ only    │
-│ or local │    │ prefs,   │    │ matter   │    │ archives  │    │ what's  │
-│ files    │    │ contacts │    │          │    │ originals │    │relevant │
-└─────────┘    └──────────┘    └──────────┘    └───────────┘    └─────────┘
-                                                    │
-                                              ┌─────┴──────┐
-                                              │Self-modify │
-                                              │config based│
-                                              │on patterns │
-                                              └────────────┘
+```bash
+pip install synesis
+export ANTHROPIC_API_KEY=sk-...
+synesis
 ```
 
-### 1. Ingest
+Three commands. The agent is now running. Here's what happens next, without you doing anything:
 
-Connectors pull raw data from your sources. Some read local files (Claude Code conversations, ChatGPT exports), others authenticate via OAuth with PKCE (Gmail, Slack, Twitter, Notion, GitHub, and more). Each connector implements a simple interface: validate access, then fetch conversations since last sync.
+1. It finds your Claude Code conversations at `~/.claude/` and reads them
+2. It sends each conversation through an LLM to extract facts, decisions, preferences, contacts, and ideas
+3. It writes each piece of knowledge as a markdown file in `~/synesis-data/knowledge/`
+4. If any category gets too large, it merges related entries to keep things compact
+5. It checks whether it should modify its own configuration based on what it learned
+6. It sleeps until the next scheduled sync (every 12 hours by default) and repeats
 
-Supported connectors:
-- **Claude Code** - reads conversation history and memory files from `~/.claude`
-- **ChatGPT** - parses the JSON export from OpenAI
-- **Claude.ai** - parses the JSON export from Anthropic
-- **Gmail** - authenticates via Google OAuth, fetches email threads from your inbox
-- More coming: Slack, Twitter/X, Notion, GitHub, Linear, Spotify
+You can close the terminal and restart `synesis` whenever - it picks up where it left off.
 
-### 2. Extract
+---
 
-An LLM processes each conversation and extracts structured knowledge into five categories:
+## Where does the data live?
 
-| Category | What it captures |
-|---|---|
-| **Facts** | Concrete truths - about you, your work, your world |
-| **Decisions** | Choices made and the reasoning behind them |
-| **Preferences** | How you like things done, your style, your taste |
-| **Contacts** | People mentioned, their roles, relationships |
-| **Ideas** | Thoughts, plans, aspirations, hypotheses |
+Everything is local. Nothing leaves your machine except API calls to Anthropic for the LLM extraction pass.
 
-The extractor also proposes configuration changes when it detects patterns (e.g., noticing you use a tool it doesn't have a connector for yet).
+```
+~/synesis-data/
+  config/synesis.yaml       # the agent's config (it rewrites this itself)
+  knowledge/                # your knowledge base
+    facts/                  # things that are true
+      cre-vertical-strategy.md
+      andrey-is-solo-founder.md
+    decisions/              # choices and reasoning
+    preferences/            # how you like things
+    contacts/               # people and relationships
+    ideas/                  # thoughts and plans
+    _archive/               # compacted originals (nothing is deleted)
+    _summaries/             # auto-generated category overviews
+  .auth/                    # encrypted OAuth tokens (never leaves disk)
+  .sync-state.json          # last sync timestamp
+```
 
-### 3. Store
-
-Each knowledge entry becomes a markdown file with YAML frontmatter:
+Every knowledge entry is a markdown file you can open and read:
 
 ```markdown
 ---
@@ -68,73 +61,65 @@ created: 2026-04-06T12:00:00Z
 updated: 2026-04-06T12:00:00Z
 ---
 
-Chose commercial real estate as the first vertical. Legacy CRE software is ripe
-for AI disruption. A 7-figure contract becomes the proof point for fundraising.
-Top wedge: Deal Intelligence + Capital Access if the Invesco connection pans out.
+Chose commercial real estate as the first vertical. Legacy CRE software
+is ripe for AI disruption. A 7-figure contract becomes the proof point
+for fundraising. Top wedge: Deal Intelligence + Capital Access.
 ```
-
-Files live in `knowledge/` organized by category. Everything is git-tracked.
-
-### 4. Compress
-
-This is how context bloat is solved. Three mechanisms work together:
-
-**Ranked retrieval** - The search index scores every entry against a query using TF-IDF cosine similarity. When an agent asks for context, it specifies a token budget (e.g., 8,000 tokens). The system returns only the highest-ranked entries that fit within that budget. The knowledge base can have 10,000 entries and the agent only sees the 5-10 that matter.
-
-**Automatic compaction** - After each sync, if any category exceeds 50 entries, the compactor groups related entries by tag overlap and title similarity, merges each group into a single denser entry via LLM, and moves the originals to `_archive/`. The knowledge base self-compresses over time while preserving everything on disk.
-
-**Category summaries** - On demand, the system generates a single-paragraph overview of an entire category. Agents can orient quickly ("what do I know about contacts?") without loading individual entries.
-
-The result: the knowledge base grows unbounded on disk, but the context window stays lean.
-
-### 5. Serve
-
-The MCP server exposes the knowledge base to any AI agent. Available tools:
-
-| Tool | Purpose |
-|---|---|
-| `search` | TF-IDF ranked search, returns top-k results |
-| `context` | Budget-aware retrieval - fits results within a token limit |
-| `list` | List entries, optionally filtered by category |
-| `read` | Read a specific entry by category and ID |
-| `write` | Write a new entry |
-| `delete` | Delete an entry |
-| `compact` | Trigger compaction manually |
-| `summarize` | Generate a category summary |
-| `sync` | Trigger a full sync cycle |
-| `get_config` | Read current configuration |
-
-### Self-modification
-
-Synesis rewrites its own `config/synesis.yaml` autonomously. No approval gates. When the extractor detects a pattern - you mention a tool it doesn't track, you show a preference for certain categories, you change how you work - it updates its own configuration to adapt.
-
-All config changes are git-tracked, so you have a full audit trail.
 
 ---
 
-## Quick start
+## How sync works
+
+Synesis syncs by reading data sources directly. No intermediary cloud service.
+
+| Source | How it reads | Auth required |
+|---|---|---|
+| **Claude Code** | Reads `~/.claude/projects/**/*.jsonl` and memory files directly from disk | None - it's local files |
+| **ChatGPT** | Parses the JSON export you download from OpenAI (Settings > Export) | None - you drop the folder path in config |
+| **Claude.ai** | Parses the JSON export you download from Anthropic | None - same as above |
+| **Gmail** | Calls Gmail API from your machine using OAuth tokens stored locally | OAuth (one-time browser login) |
+| **Slack, Twitter, Notion, GitHub, Linear, Spotify** | Same pattern - OAuth + direct API calls from your machine | OAuth |
+
+To add an OAuth source:
 
 ```bash
-pip install synesis
-export ANTHROPIC_API_KEY=sk-...
-synesis
+synesis connect google --client-id YOUR_ID --client-secret YOUR_SECRET
 ```
 
-That's it. The agent starts, syncs your Claude Code conversations, extracts knowledge, and runs autonomously on a 12-hour schedule. You don't touch it again.
+This opens your browser once for authentication. Tokens are encrypted and stored locally at `~/synesis-data/.auth/`. After that, the agent syncs this source automatically on every cycle.
 
-### Commands
+---
 
-```bash
-synesis              # start the agent (runs forever, auto-syncs)
-synesis status       # see what it knows
-synesis ask "CRE"    # query the knowledge base
-synesis connections  # see connected accounts
-synesis connect google --client-id ID --client-secret SECRET  # add OAuth source
-```
+## How context bloat is prevented
 
-### Connect via MCP
+This is the core problem Synesis solves. Your knowledge base grows over time, but context windows are finite. Three mechanisms keep things lean:
 
-Add to `~/.claude.json` so any AI agent can access your knowledge:
+### 1. Ranked retrieval with token budgets
+
+When an agent queries the knowledge base, it doesn't get everything. The search index scores every entry against the query using TF-IDF cosine similarity and returns only the top results that fit within a token budget.
+
+Example: your KB has 5,000 entries. An agent asks "what do I know about CRE strategy?" The MCP server returns the 8 most relevant entries that fit within 8,000 tokens. The other 4,992 entries are never loaded.
+
+### 2. Automatic compaction
+
+After every sync, the agent checks each category. If any category exceeds 50 entries, it:
+- Groups related entries by tag overlap and title similarity
+- Merges each group into a single, denser entry using the LLM
+- Moves the originals to `_archive/` (nothing is ever deleted)
+
+Over time, your knowledge base self-compresses. 200 raw entries might become 40 dense ones, with the originals preserved on disk if you ever need them.
+
+### 3. Category summaries
+
+On demand, the agent generates a one-paragraph overview of an entire category. An agent can ask "summarize contacts" and get a quick orientation without loading any individual entries.
+
+**The result:** the knowledge base grows unbounded on disk, but the context window only ever sees what's relevant and what fits.
+
+---
+
+## How agents access the knowledge base
+
+Synesis exposes an MCP server that any AI tool can connect to. Add this to `~/.claude.json`:
 
 ```json
 {
@@ -150,81 +135,87 @@ Add to `~/.claude.json` so any AI agent can access your knowledge:
 }
 ```
 
+Now any Claude Code session has access to your full knowledge base. The MCP server provides these tools:
+
+| Tool | What it does |
+|---|---|
+| `context` | Returns the most relevant entries that fit within a token budget. This is the main tool agents should use. |
+| `search` | TF-IDF ranked search, returns top-k results |
+| `list` | List entries by category |
+| `read` | Read a specific entry |
+| `write` | Add a new entry (agents can contribute knowledge too) |
+| `delete` | Remove an entry |
+| `compact` | Trigger compaction |
+| `summarize` | Generate a category summary |
+| `sync` | Trigger a sync cycle |
+| `get_config` | Read current configuration |
+
 ---
 
-## Architecture
+## Self-modification
 
-```
-synesis/
-  config/
-    synesis.yaml           # self-modifying configuration
-    connectors/            # per-connector config
-  knowledge/               # the knowledge base (markdown files)
-    facts/
-    decisions/
-    preferences/
-    contacts/
-    ideas/
-    _archive/              # compacted originals
-    _summaries/            # category summaries
-  synesis/                 # Python package
-    auth/
-      oauth.py             # PKCE flow, token refresh
-      store.py             # encrypted token storage (Fernet)
-      providers.py         # provider templates
-    connectors/
-      claude_code.py       # local file reader
-      chatgpt.py           # JSON export parser
-      claude_ai.py         # JSON export parser
-      gmail.py             # OAuth + Gmail API
-    extractor/
-      extractor.py         # LLM knowledge extraction
-    kb/
-      store.py             # markdown file CRUD
-      search.py            # TF-IDF search index
-      compactor.py         # hierarchical summarization
-      types.py             # data classes
-    config/
-      manager.py           # self-modification engine
-    sync/
-      engine.py            # orchestration
-    mcp/
-      server.py            # FastMCP server
-    cli.py                 # Click CLI
+The agent rewrites its own `config/synesis.yaml` based on patterns it detects. No approval required.
+
+Examples of what it might change:
+- Enable a connector it notices you mention frequently
+- Adjust extraction categories based on what kind of knowledge you generate
+- Change the sync schedule if it detects you're most active at certain times
+
+All modifications happen in `config/synesis.yaml`, which is a plain text file you can inspect anytime. If you're tracking `~/synesis-data/` with git, you get a full audit trail of every self-modification.
+
+---
+
+## CLI reference
+
+```bash
+synesis              # start the agent (runs autonomously)
+synesis status       # show what it knows (entry counts, sources, schedule)
+synesis ask "query"  # search the knowledge base from the terminal
+synesis connections  # show connected accounts and their status
+synesis connect <provider> --client-id ID --client-secret SECRET
 ```
 
-## Adding a connector
+The `synesis` command with no arguments is the primary way to use it. Everything else is optional - the agent handles itself.
 
-Extend `BaseConnector` and register it in `synesis/connectors/__init__.py`:
+---
+
+## For developers
+
+### Adding a connector
 
 ```python
 from synesis.connectors.base import BaseConnector
 from synesis.kb.types import RawConversation
 
-
 class MyConnector(BaseConnector):
     name = "my_service"
 
     def validate(self) -> bool:
-        # Check if the source is accessible
+        # Return True if the source is accessible
         ...
 
     def fetch(self, since: str | None = None) -> list[RawConversation]:
-        # Pull conversations since the given date
+        # Pull conversations since the given ISO timestamp
         ...
 ```
 
-For OAuth-backed connectors, add a provider template in `synesis/auth/providers.py` and use `OAuthManager` to handle authentication.
+Register it in `synesis/connectors/__init__.py`. For OAuth-backed connectors, add a provider template in `synesis/auth/providers.py`.
 
-## Configuration
+### Project structure
 
-`config/synesis.yaml` controls everything. The agent modifies this file as it learns, but you can edit it manually too.
+```
+synesis/
+  auth/          # OAuth (PKCE flow, encrypted token storage, provider templates)
+  connectors/    # Source plugins (claude_code, chatgpt, claude_ai, gmail)
+  extractor/     # LLM knowledge extraction
+  kb/            # Store, search index, compactor, types
+  config/        # Self-modification engine
+  sync/          # Orchestration
+  mcp/           # MCP server (FastMCP)
+  cli.py         # Agent entry point
+```
 
-Key settings:
-- `sync_schedule` - cron expression for automatic sync (default: every 12 hours)
-- `extraction.model` - which LLM to use for extraction
-- `self_modify.enabled` - toggle autonomous self-modification
-- `connectors` - enable/disable and configure each source
+---
 
 ## License
 
