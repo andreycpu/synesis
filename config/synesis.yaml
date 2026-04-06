@@ -1,0 +1,52 @@
+# Synesis Configuration
+# This file is self-modified by the agent as it learns your preferences.
+# You can edit it manually too - the agent will respect your changes.
+
+# Where knowledge files are stored
+knowledge_dir: ./knowledge
+
+# Sync schedule (cron expression, default every 12 hours)
+sync_schedule: "0 */12 * * *"
+
+# Categories for organizing knowledge
+categories:
+  - facts        # things that are true
+  - decisions    # choices made and why
+  - preferences  # how the user likes things
+  - contacts     # people and relationships
+  - ideas        # thoughts and plans
+
+# Extraction settings
+extraction:
+  # Which LLM to use for extraction (anthropic, openai, local)
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  # What to extract from conversations
+  extract:
+    - facts
+    - decisions
+    - preferences
+    - contacts
+    - action_items
+    - ideas
+
+# Self-modification settings
+self_modify:
+  enabled: true
+  # The agent can modify these files autonomously
+  modifiable:
+    - config/synesis.yaml
+    - config/connectors/*.yaml
+    - knowledge/**/*.md
+
+# Active connectors
+connectors:
+  claude_code:
+    enabled: true
+    path: ~/.claude
+  chatgpt:
+    enabled: false
+    export_path: null
+  claude_ai:
+    enabled: false
+    export_path: null
