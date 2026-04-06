@@ -115,11 +115,17 @@ class GmailConnector(BaseConnector):
             if part.get("mimeType") == "text/plain":
                 data = part.get("body", {}).get("data")
                 if data:
-                    return base64.urlsafe_b64decode(data).decode("utf-8")
+                    try:
+                        return base64.urlsafe_b64decode(data).decode("utf-8")
+                    except (ValueError, UnicodeDecodeError):
+                        continue
 
         # Fall back to body
         data = payload.get("body", {}).get("data")
         if data:
-            return base64.urlsafe_b64decode(data).decode("utf-8")
+            try:
+                return base64.urlsafe_b64decode(data).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                pass
 
         return msg.get("snippet", "")

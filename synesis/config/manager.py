@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import re
+import fnmatch
 from pathlib import Path
 
 import yaml
@@ -64,10 +64,7 @@ class ConfigManager:
 
         for update in updates:
             is_allowed = any(
-                re.match(
-                    "^" + pattern.replace("*", ".*").replace("?", ".") + "$",
-                    update.file,
-                )
+                fnmatch.fnmatch(update.file, pattern)
                 for pattern in modifiable
             )
 

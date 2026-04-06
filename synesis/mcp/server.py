@@ -1,158 +1,244 @@
-"""Synesis MCP Server - exposes the knowledge base to any AI agent."""
+"""Synesis MCP Server - filesystem-style access to the knowledge base.
+
+Agents already know how to navigate filesystems. grep, cat, tree, find -
+these are tools baked into every coding model's weights. We expose the
+knowledge base through the same interface.
+"""
 from __future__ import annotations
 
+import fnmatch
 import os
-from datetime import datetime
+import re
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from synesis.kb.compactor import Compactor
-from synesis.kb.search import SearchIndex
-from synesis.kb.store import KnowledgeStore
-from synesis.kb.types import KnowledgeEntry
-from synesis.config import ConfigManager
 from synesis.sync import SyncEngine
 
-PROJECT_DIR = Path(os.environ.get("SYNESIS_DIR", "."))
-store = KnowledgeStore(PROJECT_DIR / "knowledge")
-config_manager = ConfigManager(PROJECT_DIR / "config" / "synesis.yaml")
-search_index = SearchIndex()
-_index_loaded = False
+PROJECT_DIR = Path(os.environ.get("SYNESIS_DIR", os.path.expanduser("~/synesis-data")))
+KB_DIR = PROJECT_DIR / "knowledge"
 
 mcp = FastMCP("synesis")
 
 
-def _ensure_index():
-    global _index_loaded
-    if _index_loaded:
+@mcp.tool()
+def tree(path: str = "/", max_depth: int = 3) -> str:
+    """Show the directory structure of the knowledge base. Use this first to orient yourself."""
+    target = _resolve(path)
+    if not target.exists():
+        return f"Path not found: {path}"
+
+    lines = []
+    _tree_recurse(target, lines, prefix="", depth=0, max_depth=max_depth)
+    return "\n".join(lines) if lines else "Empty."
+
+
+def _tree_recurse(path: Path, lines: list, prefix: str, depth: int, max_depth: int):
+    if depth > max_depth:
         return
-    store.init()
-    for entry in store.list():
-        search_index.add(entry)
-    _index_loaded = True
+
+    entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
+    for i, entry in enumerate(entries):
+        is_last = i == len(entries) - 1
+        connector = "`-- " if is_last else "|-- "
+        rel = entry.relative_to(KB_DIR)
+
+        if entry.is_dir():
+            file_count = sum(1 for _ in entry.rglob("*.md"))
+            lines.append(f"{prefix}{connector}{entry.name}/ ({file_count} files)")
+            extension = "    " if is_last else "|   "
+            _tree_recurse(entry, lines, prefix + extension, depth + 1, max_depth)
+        else:
+            size = entry.stat().st_size
+            lines.append(f"{prefix}{connector}{entry.name} ({_human_size(size)})")
 
 
 @mcp.tool()
-def search(query: str, category: str | None = None, limit: int = 10) -> str:
-    """Search the knowledge base. Returns TF-IDF ranked results."""
-    _ensure_index()
-    results = search_index.search(query, limit=limit, category=category)
-    if not results:
-        return "No results found."
-    return "\n\n---\n\n".join(
-        f"## {e.title}\n**Category:** {e.category} | **Source:** {e.source} | **Tags:** {', '.join(e.tags)}\n\n{e.content}"
-        for e in results
-    )
+def cat(path: str) -> str:
+    """Read the full contents of a file. Use after grep to read relevant files."""
+    target = _resolve(path)
+    if not target.exists():
+        return f"File not found: {path}"
+    if target.is_dir():
+        return f"{path} is a directory. Use `tree` or `ls` to list contents."
+
+    content = target.read_text(encoding="utf-8")
+    # Truncate very large files
+    if len(content) > 50000:
+        return content[:50000] + f"\n\n... truncated ({len(content)} chars total)"
+    return content
 
 
 @mcp.tool()
-def context(query: str, max_tokens: int = 8000, category: str | None = None) -> str:
-    """Get relevant knowledge entries that fit within a token budget. Use this instead of search when loading knowledge into context."""
-    _ensure_index()
-    entries = search_index.get_context(query, max_tokens=max_tokens, category=category)
-    if not entries:
-        return "No relevant knowledge found."
-    est_tokens = sum((len(e.title) + len(e.content)) // 4 for e in entries)
-    header = f"*{len(entries)} entries loaded (~{est_tokens} tokens)*\n\n"
-    body = "\n\n---\n\n".join(f"## {e.title} [{e.category}]\n{e.content}" for e in entries)
-    return header + body
+def grep(pattern: str, path: str = "/", recursive: bool = True) -> str:
+    """Search file contents with regex. Returns matching lines with file paths.
+    Use `grep -rl` style: find which files mention a topic, then `cat` them."""
+    target = _resolve(path)
+    if not target.exists():
+        return f"Path not found: {path}"
+
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"Invalid regex: {e}"
+
+    results = []
+    files = target.rglob("*.md") if (recursive and target.is_dir()) else [target]
+
+    for f in files:
+        if not f.is_file():
+            continue
+        try:
+            content = f.read_text(encoding="utf-8")
+            for i, line in enumerate(content.split("\n"), 1):
+                if regex.search(line):
+                    rel = f.relative_to(KB_DIR)
+                    results.append(f"{rel}:{i}: {line.strip()}")
+        except Exception:
+            continue
+
+        if len(results) > 200:
+            results.append("... (truncated at 200 matches)")
+            break
+
+    return "\n".join(results) if results else "No matches."
 
 
 @mcp.tool()
-def list_entries(category: str | None = None) -> str:
-    """List all knowledge entries, optionally filtered by category."""
-    store.init()
-    entries = store.list(category)
-    if not entries:
-        return "No entries found."
-    return "\n".join(
-        f"- **{e.title}** [{e.category}] ({e.source}) - {e.updated}" for e in entries
-    )
+def grep_files(pattern: str, path: str = "/") -> str:
+    """List files that contain a pattern (like grep -rl). Returns file paths only."""
+    target = _resolve(path)
+    if not target.exists():
+        return f"Path not found: {path}"
+
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"Invalid regex: {e}"
+
+    matching = []
+    for f in target.rglob("*.md"):
+        try:
+            if regex.search(f.read_text(encoding="utf-8")):
+                matching.append(str(f.relative_to(KB_DIR)))
+        except Exception:
+            continue
+
+    return "\n".join(matching) if matching else "No files match."
 
 
 @mcp.tool()
-def read(category: str, id: str) -> str:
-    """Read a specific knowledge entry by category and ID."""
-    store.init()
-    entry = store.read(category, id)
-    if not entry:
-        return "Entry not found."
-    return (
-        f"# {entry.title}\n\n"
-        f"**Category:** {entry.category}\n**Source:** {entry.source}\n"
-        f"**Tags:** {', '.join(entry.tags)}\n**Created:** {entry.created}\n"
-        f"**Updated:** {entry.updated}\n\n{entry.content}"
-    )
+def ls(path: str = "/") -> str:
+    """List directory contents."""
+    target = _resolve(path)
+    if not target.exists():
+        return f"Path not found: {path}"
+    if target.is_file():
+        size = target.stat().st_size
+        return f"{target.name} ({_human_size(size)})"
+
+    entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name))
+    lines = []
+    for entry in entries:
+        if entry.is_dir():
+            count = sum(1 for _ in entry.rglob("*.md"))
+            lines.append(f"  {entry.name}/  ({count} files)")
+        else:
+            lines.append(f"  {entry.name}  ({_human_size(entry.stat().st_size)})")
+
+    return "\n".join(lines) if lines else "Empty directory."
 
 
 @mcp.tool()
-def write(title: str, category: str, content: str, tags: list[str] | None = None, source: str = "mcp") -> str:
-    """Write a new knowledge entry."""
-    store.init()
-    import re
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
-    now = datetime.now().isoformat()
+def find(pattern: str, path: str = "/") -> str:
+    """Find files by name pattern (glob). Example: find('*strategy*')"""
+    target = _resolve(path)
+    if not target.exists():
+        return f"Path not found: {path}"
 
-    entry = KnowledgeEntry(
-        id=slug, title=title, category=category, content=content,
-        source=source, tags=tags or [], created=now, updated=now,
-    )
-    path = store.write(entry)
-    search_index.add(entry)
-    return f"Entry written to {path}"
+    matching = []
+    for f in target.rglob("*"):
+        if fnmatch.fnmatch(f.name, pattern):
+            matching.append(str(f.relative_to(KB_DIR)))
+
+    return "\n".join(matching) if matching else "No files match."
 
 
 @mcp.tool()
-def delete(category: str, id: str) -> str:
-    """Delete a knowledge entry."""
-    store.init()
-    success = store.delete(category, id)
-    if success:
-        search_index.remove(category, id)
-    return "Entry deleted." if success else "Entry not found."
+def write_file(path: str, content: str) -> str:
+    """Write a markdown file to the knowledge base. Agents can contribute knowledge too."""
+    if not path.endswith(".md"):
+        return "Error: only .md files can be written to the knowledge base."
 
+    target = _resolve(path)
+    if target == KB_DIR:
+        return "Error: invalid path."
 
-@mcp.tool()
-def compact(max_per_category: int = 50) -> str:
-    """Merge related entries to reduce knowledge base size."""
-    global _index_loaded
-    compactor = Compactor(store)
-    result = compactor.compact(max_per_category)
-    _index_loaded = False  # Force reindex
-    if result.merged == 0:
-        return "No compaction needed."
-    lines = [f"Compacted: {result.merged} merges, {result.archived} entries archived."]
-    for c in result.categories:
-        lines.append(f"  {c['category']}: {c['merged']} groups merged, {c['archived']} archived")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def summarize(category: str) -> str:
-    """Generate a concise summary of a knowledge category."""
-    compactor = Compactor(store)
-    summary = compactor.summarize_category(category)
-    if not summary:
-        return f"No entries in category: {category}"
-    store.write(summary)
-    return summary.content
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return f"Written: {path}"
 
 
 @mcp.tool()
 def sync() -> str:
-    """Trigger a full sync cycle: fetch, extract, compact."""
+    """Trigger a sync cycle to pull new data from connected sources."""
     engine = SyncEngine(str(PROJECT_DIR))
     result = engine.run()
-    return f"Sync complete: {result['entries']} entries, {len(result['config_updates'])} config updates."
+    return f"Synced: {result['entries']} files written."
 
 
 @mcp.tool()
-def get_config() -> str:
-    """Read the current Synesis configuration."""
-    import json
-    config = config_manager.load()
-    return json.dumps(config, indent=2, default=str)
+def stats() -> str:
+    """Show knowledge base stats: file counts by source, total size."""
+    if not KB_DIR.exists():
+        return "Knowledge base is empty."
+
+    by_source: dict[str, int] = {}
+    total_size = 0
+
+    for f in KB_DIR.rglob("*.md"):
+        source = f.parent.name
+        by_source[source] = by_source.get(source, 0) + 1
+        total_size += f.stat().st_size
+
+    lines = [f"Total: {sum(by_source.values())} files ({_human_size(total_size)})", ""]
+    for source, count in sorted(by_source.items()):
+        lines.append(f"  {source}/  {count} files")
+
+    return "\n".join(lines)
+
+
+def _resolve(path: str) -> Path:
+    """Resolve a path relative to the knowledge base root. Blocks traversal and symlinks."""
+    clean = path.strip("/")
+    if not clean:
+        return KB_DIR
+
+    # Build path without resolving symlinks first
+    target = KB_DIR / clean
+
+    # Block any symlinks in the path chain
+    check = KB_DIR
+    for part in Path(clean).parts:
+        check = check / part
+        if check.is_symlink():
+            return KB_DIR
+
+    # Resolve and verify it's still under KB_DIR
+    resolved = target.resolve()
+    kb_resolved = KB_DIR.resolve()
+    if not str(resolved).startswith(str(kb_resolved) + os.sep) and resolved != kb_resolved:
+        return KB_DIR
+    return resolved
+
+
+def _human_size(size: int) -> str:
+    if size < 1024:
+        return f"{size}B"
+    elif size < 1024 * 1024:
+        return f"{size // 1024}K"
+    else:
+        return f"{size // (1024 * 1024)}M"
 
 
 def main():

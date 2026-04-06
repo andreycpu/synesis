@@ -1,27 +1,37 @@
 # Synesis
 
-A self-evolving agent memory system. Install it, run it, it asks you what to connect, then it handles everything forever.
+Your conversations, emails, and messages - stored as files on your machine. Any AI agent can navigate them with `grep`, `cat`, `tree`, and `find`.
 
-No manual syncing. No config files. No dashboards to check. The agent runs autonomously on your machine, ingests your conversations, extracts knowledge, compresses it to prevent context bloat, and serves it to any AI tool.
+No LLM extraction. No database. No cloud. Just your raw data as a filesystem that agents already know how to use.
+
+---
+
+## Why not LLM extraction?
+
+Most knowledge base tools run an LLM over your data to "extract" structured knowledge. This is wrong for three reasons:
+
+1. **It's lossy.** The LLM decides at sync time what's important and throws away the rest. Context that matters later gets discarded now.
+2. **It's expensive.** Every sync cycle burns API credits to process conversations you already have.
+3. **It's unnecessary.** Agents are pre-trained on billions of tokens of filesystem interactions. `grep`, `cat`, `tree`, `find` - these aren't tools agents learn to use. They're tools agents already know.
+
+Synesis takes the opposite approach: store the raw data as files, let agents navigate it at query time. The filesystem is the interface.
 
 ---
 
 ## Get started
 
-```bash
+```
 pip install synesis
 synesis
 ```
 
-That's it. On first run, Synesis walks you through setup:
+First run, it asks you what to connect:
 
 ```
   SYNESIS  self-evolving agent memory
   ------------------------------------------
 
   Let's set you up. This takes about 30 seconds.
-
-  Enter your ANTHROPIC_API_KEY: ****
 
   + Claude Code (auto-detected, no setup needed)
 
@@ -30,81 +40,90 @@ That's it. On first run, Synesis walks you through setup:
   Gmail + Google Calendar + Drive (emails, calendar events, documents)? [y/N]: y
   Client ID for Gmail: ****
   Client Secret for Gmail: ****
-  Opening browser for Gmail authentication...
+  Opening browser...
   + Gmail connected
 
   Slack (messages and channels)? [y/N]: n
-  Notion (pages and databases)? [y/N]: y
   ...
 
   Setup complete. You won't need to do this again.
 ```
 
-After setup, the agent syncs immediately and then runs on a 12-hour loop. You never interact with it again unless you want to.
+After that, it syncs and runs forever. No API keys needed for the core system. No LLM in the loop.
 
 ---
 
-## What happens after you run it
+## What happens
 
-1. **Ingests** - reads your Claude Code conversations from `~/.claude/`, calls Gmail API, hits whatever else you connected. All local, nothing goes to a cloud service.
-2. **Extracts** - sends conversations through an LLM to pull out facts, decisions, preferences, contacts, and ideas. This is the only external call (Anthropic API).
-3. **Stores** - writes each piece of knowledge as a markdown file in `~/synesis-data/knowledge/`. You can open any file and read it.
-4. **Compresses** - if any category exceeds 50 entries, merges related ones into denser entries. Originals are archived, never deleted. Your context window stays clean.
-5. **Self-modifies** - rewrites its own config based on patterns it detects. No approval needed.
-6. **Sleeps** - waits until the next sync cycle and repeats.
+1. **Syncs** your sources - reads Claude Code conversations from disk, calls Gmail/Slack/etc APIs from your machine
+2. **Writes** each conversation as a markdown file in `~/synesis-data/knowledge/`
+3. **Sleeps** until the next cycle (every 12 hours by default)
 
----
-
-## How context bloat is prevented
-
-This is the core problem. Your knowledge base grows, but context windows are finite. Three layers solve this:
-
-**Ranked retrieval** - when an agent queries the KB, the search index scores every entry against the query and returns only what fits within a token budget. 5,000 entries in the KB, but the agent only sees the 8 most relevant ones.
-
-**Automatic compaction** - after every sync, related entries get merged into denser summaries. 200 raw entries become 40 dense ones over time. Originals stay on disk in `_archive/`.
-
-**Category summaries** - one-paragraph overviews of entire categories. Quick orientation without loading individual entries.
+That's it. No extraction, no summarization, no processing. The raw data is the knowledge base.
 
 ---
 
-## How agents access the knowledge base
+## How agents use it
 
-Add this to `~/.claude.json`:
+Add to `~/.claude.json`:
 
 ```json
 {
   "mcpServers": {
     "synesis": {
       "command": "synesis-mcp",
-      "env": {
-        "SYNESIS_DIR": "~/synesis-data",
-        "ANTHROPIC_API_KEY": "sk-..."
-      }
+      "env": { "SYNESIS_DIR": "~/synesis-data" }
     }
   }
 }
 ```
 
-Now any Claude Code session can query your full knowledge base. The main tool is `context` - it returns the most relevant entries that fit within a token budget. Agents can also `write` new entries, so the KB grows from both your conversations and agent activity.
+Now any Claude Code session can navigate your full conversation history:
+
+```
+# Orient - what's in the knowledge base?
+tree /
+
+# Find files that mention a topic
+grep_files "CRE strategy"
+
+# Read a specific conversation
+cat claude_code/abc123.md
+
+# Search for exact content
+grep "Invesco" /
+
+# Find files by name
+find "*strategy*"
+```
+
+Agents already know this workflow: `tree` to orient, `grep` to find, `cat` to read. It's how every developer navigates a codebase. The knowledge base is just another directory.
+
+### MCP tools
+
+| Tool | What it does |
+|---|---|
+| `tree` | Show directory structure |
+| `cat` | Read a file |
+| `grep` | Search file contents (regex) |
+| `grep_files` | List files matching a pattern (like `grep -rl`) |
+| `ls` | List directory contents |
+| `find` | Find files by name (glob) |
+| `write_file` | Write a file (agents can contribute) |
+| `sync` | Trigger a sync |
+| `stats` | File counts by source |
 
 ---
 
-## What gets connected
+## How context bloat is prevented
 
-| Source | How it syncs | Setup |
-|---|---|---|
-| Claude Code | Reads local files at `~/.claude/` | Automatic, no setup |
-| Gmail / Calendar / Drive | OAuth, calls Google API from your machine | Browser login during setup |
-| Slack | OAuth, calls Slack API from your machine | Browser login during setup |
-| Notion | OAuth, calls Notion API from your machine | Browser login during setup |
-| GitHub | OAuth, calls GitHub API from your machine | Browser login during setup |
-| Twitter / X | OAuth, calls Twitter API from your machine | Browser login during setup |
-| Linear | OAuth, calls Linear API from your machine | Browser login during setup |
-| Spotify | OAuth, calls Spotify API from your machine | Browser login during setup |
-| ChatGPT | JSON export from OpenAI (Settings > Export) | Drop the file path in config |
-| Claude.ai | JSON export from Anthropic | Drop the file path in config |
+The filesystem approach solves context bloat naturally:
 
-All API calls happen from your machine. Data never passes through a third-party cloud service.
+**Agents only load what they need.** An agent doesn't dump the entire KB into context. It runs `grep_files "topic"` to find 3 relevant files out of 5,000, then `cat`s those 3. The other 4,997 are never loaded.
+
+**The data is already structured.** Conversations are organized by source (`claude_code/`, `gmail/`, `slack/`). Each file has frontmatter with metadata. Agents can narrow their search to a specific source directory.
+
+**No compression needed.** Since agents navigate the raw files at query time, there's nothing to compress. The filesystem can grow unbounded - agents just grep through it.
 
 ---
 
@@ -112,18 +131,55 @@ All API calls happen from your machine. Data never passes through a third-party 
 
 ```
 ~/synesis-data/
-  config/synesis.yaml       # agent config (self-modifying)
-  knowledge/                # your knowledge base (markdown files)
-    facts/
-    decisions/
-    preferences/
-    contacts/
-    ideas/
-    _archive/               # compacted originals
-    _summaries/             # auto-generated overviews
-  .auth/                    # encrypted OAuth tokens
-  .env                      # API key (created during setup)
+  config/synesis.yaml         # agent config
+  knowledge/                  # your data as files
+    claude_code/              # Claude Code conversations
+      session-abc123.md
+      session-def456.md
+    claude_code_memory/       # Claude Code memory files
+      memory-project-foo.md
+    gmail/                    # email threads
+      gmail-thread-xyz.md
+    slack/                    # messages
+    ...
+  .auth/                      # encrypted OAuth tokens
 ```
+
+Every file is a readable markdown document with YAML frontmatter:
+
+```markdown
+---
+source: claude_code
+id: abc123
+synced: 2026-04-06T16:00:00
+timestamp: 2026-04-06T14:30:00
+---
+
+## USER
+
+How should we approach the CRE vertical?
+
+## ASSISTANT
+
+The commercial real estate market has five main wedges...
+```
+
+---
+
+## What gets connected
+
+| Source | How it syncs | Setup |
+|---|---|---|
+| Claude Code | Reads local files from `~/.claude/` | Automatic |
+| Gmail / Calendar / Drive | OAuth, API calls from your machine | Browser login during setup |
+| Slack | OAuth, API calls from your machine | Browser login during setup |
+| Notion | OAuth, API calls from your machine | Browser login during setup |
+| GitHub | OAuth, API calls from your machine | Browser login during setup |
+| Twitter / X | OAuth, API calls from your machine | Browser login during setup |
+| Linear | OAuth, API calls from your machine | Browser login during setup |
+| Spotify | OAuth, API calls from your machine | Browser login during setup |
+
+All data stays on your machine. The only network calls are to the source APIs themselves.
 
 ---
 
@@ -137,24 +193,22 @@ from synesis.kb.types import RawConversation
 
 class MyConnector(BaseConnector):
     name = "my_service"
-
     def validate(self) -> bool: ...
     def fetch(self, since: str | None = None) -> list[RawConversation]: ...
 ```
 
-Register in `synesis/connectors/__init__.py`. For OAuth connectors, add a provider template in `synesis/auth/providers.py`.
+Register in `synesis/connectors/__init__.py`. The sync engine writes each returned conversation as a markdown file automatically.
 
 ### Project structure
 
 ```
 synesis/
-  auth/          # OAuth (PKCE, encrypted token storage, provider templates)
+  auth/          # OAuth (PKCE, encrypted token storage)
   connectors/    # Source plugins
-  extractor/     # LLM knowledge extraction
-  kb/            # Store, TF-IDF search, compactor
-  config/        # Self-modification engine
-  sync/          # Orchestration
-  mcp/           # MCP server
+  kb/            # Types and store utilities
+  config/        # Configuration manager
+  sync/          # Sync engine (raw file writer, no LLM)
+  mcp/           # MCP server (filesystem tools: tree, cat, grep, find, ls)
   cli.py         # Entry point
 ```
 

@@ -1,28 +1,31 @@
+"""Sync engine - ingests raw conversations and stores them as browsable files.
+
+No LLM extraction. The raw data IS the knowledge base. Agents navigate
+it with grep, cat, tree - tools they already know.
+"""
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 from synesis.config import ConfigManager
 from synesis.connectors import create_connector
-from synesis.extractor import Extractor
-from synesis.kb.compactor import Compactor
-from synesis.kb.store import KnowledgeStore
 from synesis.kb.types import RawConversation
 
 
 class SyncEngine:
     def __init__(self, project_dir: str | Path):
         project_dir = Path(project_dir)
+        self.project_dir = project_dir
         self.config_manager = ConfigManager(project_dir / "config" / "synesis.yaml")
-        self.store = KnowledgeStore(project_dir / "knowledge")
-        self.extractor = Extractor()
+        self.data_dir = project_dir / "knowledge"
         self.state_file = project_dir / ".sync-state.json"
 
     def run(self) -> dict:
         config = self.config_manager.load()
-        self.store.init()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
 
         last_sync = self._get_last_sync()
         print(f"Synesis sync starting... (since: {last_sync or 'beginning'})")
@@ -52,35 +55,54 @@ class SyncEngine:
             self._save_last_sync()
             return {"entries": 0, "config_updates": []}
 
-        # Extract knowledge
-        print(f"Extracting knowledge from {len(all_conversations)} conversations...")
-        result = self.extractor.extract(all_conversations)
-
-        # Write entries
+        # Write conversations as browsable files - no LLM, just raw data
         written = 0
-        for entry in result.entries:
-            self.store.write(entry)
-            written += 1
-            print(f"  + [{entry.category}] {entry.title}")
-
-        # Apply self-modifications
-        applied: list[str] = []
-        if result.config_updates:
-            print(f"Applying {len(result.config_updates)} config updates...")
-            applied = self.config_manager.apply_updates(result.config_updates)
-            for a in applied:
-                print(f"  ~ {a}")
-
-        # Run compaction
-        compactor = Compactor(self.store)
-        compaction = compactor.compact(50)
-        if compaction.merged > 0:
-            print(f"Compacted: {compaction.merged} merges, {compaction.archived} entries archived")
+        for conv in all_conversations:
+            path = self._write_conversation(conv)
+            if path:
+                written += 1
+                print(f"  + {path.relative_to(self.data_dir)}")
 
         self._save_last_sync()
-        print(f"Sync complete: {written} entries, {len(applied)} config updates")
+        print(f"Sync complete: {written} files written")
 
-        return {"entries": written, "config_updates": applied}
+        return {"entries": written, "config_updates": []}
+
+    def _write_conversation(self, conv: RawConversation) -> Path | None:
+        """Write a conversation as a markdown file, organized by source."""
+        source_dir = self.data_dir / conv.source
+        source_dir.mkdir(parents=True, exist_ok=True)
+
+        # Clean up the ID for use as filename
+        filename = re.sub(r"[^a-zA-Z0-9_-]", "-", conv.id)[:80] + ".md"
+        file_path = source_dir / filename
+
+        # Build markdown content
+        lines = []
+
+        # Frontmatter
+        lines.append("---")
+        lines.append(f"source: {conv.source}")
+        lines.append(f"id: {conv.id}")
+        lines.append(f"synced: {datetime.now().isoformat()}")
+        lines.append(f"timestamp: {conv.timestamp}")
+        if conv.metadata:
+            for k, v in conv.metadata.items():
+                if isinstance(v, str):
+                    lines.append(f"{k}: {v}")
+        lines.append("---")
+        lines.append("")
+
+        # Conversation content
+        for msg in conv.messages:
+            role = msg.role.upper()
+            lines.append(f"## {role}")
+            lines.append("")
+            lines.append(msg.content)
+            lines.append("")
+
+        file_path.write_text("\n".join(lines), encoding="utf-8")
+        return file_path
 
     def _get_last_sync(self) -> str | None:
         if not self.state_file.exists():
