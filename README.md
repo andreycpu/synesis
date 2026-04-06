@@ -115,58 +115,40 @@ All config changes are git-tracked, so you have a full audit trail.
 ## Quick start
 
 ```bash
-# Clone and install
-git clone https://github.com/andreycpu/synesis.git
-cd synesis
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-# Initialize the knowledge base
-synesis init
-
-# Run your first sync (ingests Claude Code conversations)
-ANTHROPIC_API_KEY=sk-... synesis sync
-
-# Search your knowledge
-synesis search "project strategy"
-
-# Run as a daemon (syncs every 12 hours by default)
-ANTHROPIC_API_KEY=sk-... synesis daemon
+pip install synesis
+export ANTHROPIC_API_KEY=sk-...
+synesis
 ```
 
-### Authenticate with OAuth services
+That's it. The agent starts, syncs your Claude Code conversations, extracts knowledge, and runs autonomously on a 12-hour schedule. You don't touch it again.
+
+### Commands
 
 ```bash
-# Gmail
-synesis auth login google --client-id YOUR_ID --client-secret YOUR_SECRET
-
-# View authenticated providers
-synesis auth list
-
-# Revoke access
-synesis auth revoke google
+synesis              # start the agent (runs forever, auto-syncs)
+synesis status       # see what it knows
+synesis ask "CRE"    # query the knowledge base
+synesis connections  # see connected accounts
+synesis connect google --client-id ID --client-secret SECRET  # add OAuth source
 ```
 
 ### Connect via MCP
 
-Add to `~/.claude.json`:
+Add to `~/.claude.json` so any AI agent can access your knowledge:
 
 ```json
 {
   "mcpServers": {
     "synesis": {
-      "command": "/path/to/synesis/.venv/bin/synesis-mcp",
+      "command": "synesis-mcp",
       "env": {
-        "SYNESIS_DIR": "/path/to/synesis",
+        "SYNESIS_DIR": "~/synesis-data",
         "ANTHROPIC_API_KEY": "sk-..."
       }
     }
   }
 }
 ```
-
-Now any Claude Code session can search, read, and write to your knowledge base.
 
 ---
 

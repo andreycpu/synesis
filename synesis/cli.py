@@ -1,129 +1,109 @@
-"""Synesis CLI - self-evolving agent memory system."""
+"""Synesis CLI - self-evolving agent memory system.
+
+Run `synesis` and it just works. No manual syncing, no manual anything.
+The agent handles everything autonomously.
+"""
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import click
+from croniter import croniter
 
 from synesis.auth import OAuthManager, get_provider, list_providers
 from synesis.config import ConfigManager
-from synesis.kb.compactor import Compactor
 from synesis.kb.store import KnowledgeStore
 from synesis.sync import SyncEngine
 
-PROJECT_DIR = Path(os.environ.get("SYNESIS_DIR", "."))
+PROJECT_DIR = Path(os.environ.get("SYNESIS_DIR", os.path.expanduser("~/synesis-data")))
 
 
-@click.group()
+def _print_header():
+    click.echo()
+    click.echo("  \033[1;35mSYNESIS\033[0m  self-evolving agent memory")
+    click.echo("  \033[2m" + "-" * 42 + "\033[0m")
+
+
+def _print_status(config: dict, store: KnowledgeStore):
+    entries = store.list()
+    by_cat: dict[str, int] = {}
+    for e in entries:
+        by_cat[e.category] = by_cat.get(e.category, 0) + 1
+
+    # Count active connectors
+    connectors = config.get("connectors", {})
+    active = [n for n, c in connectors.items() if c.get("enabled")]
+
+    click.echo(f"  \033[2mdata\033[0m     ~/synesis-data")
+    click.echo(f"  \033[2mentries\033[0m  {len(entries)} total", nl=False)
+    if by_cat:
+        parts = [f"{v} {k}" for k, v in sorted(by_cat.items())]
+        click.echo(f" ({', '.join(parts)})")
+    else:
+        click.echo()
+    click.echo(f"  \033[2msources\033[0m  {', '.join(active) if active else 'none'}")
+    click.echo(f"  \033[2mschedule\033[0m {config.get('sync_schedule', '0 */12 * * *')}")
+    click.echo()
+
+
+def _log(msg: str, level: str = "info"):
+    ts = datetime.now().strftime("%H:%M:%S")
+    colors = {"info": "36", "ok": "32", "warn": "33", "err": "31", "dim": "2"}
+    c = colors.get(level, "0")
+    click.echo(f"  \033[2m{ts}\033[0m  \033[{c}m{msg}\033[0m")
+
+
+@click.group(invoke_without_command=True)
 @click.version_option("0.1.0")
-def cli():
-    """Synesis - self-evolving agent memory system."""
-    pass
+@click.pass_context
+def cli(ctx):
+    """Synesis - self-evolving agent memory system.
+
+    Run without arguments to start the agent. It will auto-sync
+    on schedule and evolve its own configuration over time.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(run)
 
 
 @cli.command()
-@click.option("-p", "--port", default=3000, help="Port to run on")
-def web(port: int):
-    """Launch the Synesis web UI."""
-    from synesis.web.app import main as run_web
-    os.environ["SYNESIS_PORT"] = str(port)
-    run_web()
+def run():
+    """Start the Synesis agent. Runs autonomously forever."""
+    PROJECT_DIR.mkdir(parents=True, exist_ok=True)
 
-
-@cli.command()
-def init():
-    """Initialize a new Synesis knowledge base."""
     store = KnowledgeStore(PROJECT_DIR / "knowledge")
     store.init()
 
     config_manager = ConfigManager(PROJECT_DIR / "config" / "synesis.yaml")
-    config_manager.load()
-
-    click.echo("Synesis initialized.")
-    click.echo(f"  Knowledge base: {PROJECT_DIR / 'knowledge'}")
-    click.echo(f"  Config: {PROJECT_DIR / 'config' / 'synesis.yaml'}")
-    click.echo("\nRun 'synesis sync' to start extracting knowledge.")
-
-
-@cli.command()
-def sync():
-    """Run a sync cycle: fetch, extract, compact."""
-    engine = SyncEngine(str(PROJECT_DIR))
-    engine.run()
-
-
-@cli.command()
-@click.argument("query")
-@click.option("-c", "--category", default=None, help="Filter by category")
-def search(query: str, category: str | None):
-    """Search the knowledge base."""
-    store = KnowledgeStore(PROJECT_DIR / "knowledge")
-    results = store.search(query, category)
-
-    if not results:
-        click.echo("No results found.")
-        return
-
-    for entry in results:
-        click.echo(f"\n[{entry.category}] {entry.title}")
-        click.echo(f"  Source: {entry.source} | Tags: {', '.join(entry.tags)}")
-        preview = entry.content[:200] + ("..." if len(entry.content) > 200 else "")
-        click.echo(f"  {preview}")
-
-
-@cli.command("list")
-@click.option("-c", "--category", default=None, help="Filter by category")
-def list_entries(category: str | None):
-    """List knowledge entries."""
-    store = KnowledgeStore(PROJECT_DIR / "knowledge")
-    entries = store.list(category)
-
-    if not entries:
-        click.echo("No entries found.")
-        return
-
-    click.echo(f"\n{len(entries)} entries:\n")
-    for entry in entries:
-        click.echo(f"  [{entry.category}] {entry.title} ({entry.source}) - {entry.updated}")
-
-
-@cli.command()
-@click.option("-t", "--threshold", default=50, help="Max entries per category")
-def compact(threshold: int):
-    """Merge related entries to reduce KB size."""
-    store = KnowledgeStore(PROJECT_DIR / "knowledge")
-    compactor = Compactor(store)
-    result = compactor.compact(threshold)
-
-    if result.merged == 0:
-        click.echo("No compaction needed.")
-    else:
-        click.echo(f"Compacted: {result.merged} merges, {result.archived} entries archived")
-        for c in result.categories:
-            click.echo(f"  {c['category']}: {c['merged']} groups, {c['archived']} archived")
-
-
-@cli.command()
-def daemon():
-    """Run as a daemon with scheduled sync."""
-    from croniter import croniter
-
-    config_manager = ConfigManager(PROJECT_DIR / "config" / "synesis.yaml")
     config = config_manager.load()
+
+    _print_header()
+    _print_status(config, store)
+
     schedule = config.get("sync_schedule", "0 */12 * * *")
 
-    click.echo(f"Synesis daemon starting...")
-    click.echo(f"Schedule: {schedule}")
+    # Run first sync immediately
+    _log("starting initial sync...")
+    try:
+        engine = SyncEngine(str(PROJECT_DIR))
+        result = engine.run()
+        _log(f"synced: {result['entries']} entries extracted, {len(result['config_updates'])} self-modifications", "ok")
+    except Exception as e:
+        _log(f"sync failed: {e}", "err")
 
-    # Run immediately
-    engine = SyncEngine(str(PROJECT_DIR))
-    engine.run()
+    # Reload config (may have been self-modified)
+    config = config_manager.load()
+    _print_status(config, store)
 
+    # Schedule loop
     cron = croniter(schedule)
-    click.echo("Daemon running. Press Ctrl+C to stop.")
+    _log(f"agent running, next sync at {datetime.fromtimestamp(cron.get_next(float)).strftime('%H:%M')}", "dim")
+    _log("ctrl+c to stop", "dim")
 
     try:
         while True:
@@ -131,71 +111,134 @@ def daemon():
             sleep_time = max(0, next_run - time.time())
             time.sleep(sleep_time)
 
-            click.echo(f"\n[{__import__('datetime').datetime.now().isoformat()}] Scheduled sync...")
-            fresh_engine = SyncEngine(str(PROJECT_DIR))
-            fresh_engine.run()
+            _log("scheduled sync starting...")
+            try:
+                config = config_manager.load()
+                fresh_engine = SyncEngine(str(PROJECT_DIR))
+                result = fresh_engine.run()
+                _log(
+                    f"synced: {result['entries']} entries, {len(result['config_updates'])} self-mods",
+                    "ok",
+                )
+            except Exception as e:
+                _log(f"sync failed: {e}", "err")
+
+            cron = croniter(schedule)
+            _log(f"next sync at {datetime.fromtimestamp(cron.get_next(float)).strftime('%H:%M')}", "dim")
     except KeyboardInterrupt:
-        click.echo("\nDaemon stopped.")
+        click.echo()
+        _log("agent stopped", "dim")
 
 
 @cli.command()
-def config():
-    """Show current configuration."""
+def status():
+    """Show what Synesis knows."""
+    store = KnowledgeStore(PROJECT_DIR / "knowledge")
+    store.init()
     config_manager = ConfigManager(PROJECT_DIR / "config" / "synesis.yaml")
-    cfg = config_manager.load()
-    click.echo(json.dumps(cfg, indent=2, default=str))
+    config = config_manager.load()
+
+    _print_header()
+    _print_status(config, store)
+
+    entries = store.list()
+    if entries:
+        click.echo("  \033[2mrecent:\033[0m")
+        for e in entries[:10]:
+            click.echo(f"    \033[35m{e.category:12s}\033[0m {e.title}")
+        if len(entries) > 10:
+            click.echo(f"    \033[2m... and {len(entries) - 10} more\033[0m")
+    click.echo()
 
 
-# --- Auth commands ---
+@cli.command()
+@click.argument("query")
+def ask(query: str):
+    """Ask Synesis what it knows about something."""
+    from synesis.kb.search import SearchIndex
 
-@cli.group()
-def auth():
-    """Manage OAuth authentication for connectors."""
-    pass
+    store = KnowledgeStore(PROJECT_DIR / "knowledge")
+    store.init()
+
+    index = SearchIndex()
+    for entry in store.list():
+        index.add(entry)
+
+    results = index.get_context(query, max_tokens=4000)
+
+    if not results:
+        click.echo("  \033[2mno relevant knowledge found\033[0m")
+        return
+
+    click.echo()
+    for e in results:
+        click.echo(f"  \033[35m[{e.category}]\033[0m \033[1m{e.title}\033[0m")
+        # Indent content
+        for line in e.content.split("\n")[:4]:
+            click.echo(f"    \033[2m{line}\033[0m")
+        if e.tags:
+            click.echo(f"    \033[36m{' '.join('#' + t for t in e.tags)}\033[0m")
+        click.echo()
 
 
-@auth.command("login")
+@cli.command()
 @click.argument("provider_name")
 @click.option("--client-id", required=True, help="OAuth client ID")
 @click.option("--client-secret", required=True, help="OAuth client secret")
-def auth_login(provider_name: str, client_id: str, client_secret: str):
-    """Authenticate with a provider."""
+def connect(provider_name: str, client_id: str, client_secret: str):
+    """Connect an account via OAuth."""
+    PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+
     provider = get_provider(provider_name, client_id, client_secret)
     if not provider:
-        click.echo(f"Unknown provider: {provider_name}")
-        click.echo(f"Available: {', '.join(list_providers())}")
-        raise SystemExit(1)
+        click.echo(f"  \033[31munknown provider: {provider_name}\033[0m")
+        click.echo(f"  available: {', '.join(list_providers())}")
+        return
 
     oauth = OAuthManager(str(PROJECT_DIR))
     oauth.init()
+
+    # Also save credentials to config so syncs can use them
+    config_manager = ConfigManager(PROJECT_DIR / "config" / "synesis.yaml")
+    config = config_manager.load()
+    connector_name = "gmail" if provider_name == "google" else provider_name
+    config.setdefault("connectors", {}).setdefault(connector_name, {})
+    config["connectors"][connector_name]["client_id"] = client_id
+    config["connectors"][connector_name]["client_secret"] = client_secret
+    config["connectors"][connector_name]["enabled"] = True
+    config_manager.config = config
+    config_manager.save()
+
     oauth.authenticate(provider)
-    click.echo(f"\nAuthenticated with {provider_name}.")
+    _log(f"connected to {provider_name}", "ok")
 
 
-@auth.command("list")
-def auth_list():
-    """List authenticated providers."""
+@cli.command()
+def connections():
+    """Show connected accounts."""
     oauth = OAuthManager(str(PROJECT_DIR))
     oauth.init()
-    providers = oauth.list_authenticated()
+    authenticated = oauth.list_authenticated()
 
-    if not providers:
-        click.echo("No authenticated providers.")
-        click.echo(f"Available: {', '.join(list_providers())}")
-    else:
-        click.echo("Authenticated providers:")
-        for p in providers:
-            click.echo(f"  - {p}")
+    config_manager = ConfigManager(PROJECT_DIR / "config" / "synesis.yaml")
+    config = config_manager.load()
+    connectors = config.get("connectors", {})
 
+    click.echo()
+    for name, conf in connectors.items():
+        enabled = conf.get("enabled", False)
+        authed = name in authenticated or name == "claude_code"
+        if enabled and authed:
+            click.echo(f"  \033[32m*\033[0m {name}")
+        elif enabled:
+            click.echo(f"  \033[33m*\033[0m {name} \033[2m(not authenticated)\033[0m")
+        else:
+            click.echo(f"  \033[2m  {name} (disabled)\033[0m")
 
-@auth.command("revoke")
-@click.argument("provider_name")
-def auth_revoke(provider_name: str):
-    """Revoke authentication for a provider."""
-    oauth = OAuthManager(str(PROJECT_DIR))
-    oauth.init()
-    success = oauth.revoke(provider_name)
-    click.echo(f"Revoked {provider_name}." if success else f"No auth found for {provider_name}.")
+    available = [p for p in list_providers() if p not in connectors]
+    if available:
+        click.echo(f"\n  \033[2mavailable: {', '.join(available)}\033[0m")
+    click.echo()
 
 
 if __name__ == "__main__":
