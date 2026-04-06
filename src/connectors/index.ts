@@ -3,6 +3,7 @@ import { BaseConnector } from "./base.js";
 import { ClaudeCodeConnector } from "./claude-code.js";
 import { ChatGPTConnector } from "./chatgpt.js";
 import { ClaudeAIConnector } from "./claude-ai.js";
+import { GmailConnector } from "./gmail.js";
 
 const CONNECTOR_REGISTRY: Record<
   string,
@@ -11,6 +12,7 @@ const CONNECTOR_REGISTRY: Record<
   claude_code: ClaudeCodeConnector,
   chatgpt: ChatGPTConnector,
   claude_ai: ClaudeAIConnector,
+  gmail: GmailConnector,
 };
 
 export function createConnector(

@@ -5,6 +5,8 @@ import { SyncEngine } from "./sync/index.js";
 import { KnowledgeStore } from "./kb/store.js";
 import { ConfigManager } from "./config/index.js";
 import { Cron } from "croner";
+import { OAuthManager } from "./auth/oauth.js";
+import { getProvider, listProviders } from "./auth/providers.js";
 
 const PROJECT_DIR = process.env.SYNESIS_DIR || process.cwd();
 
@@ -116,6 +118,59 @@ program
     console.log(`  Knowledge base: ${path.join(PROJECT_DIR, "knowledge")}`);
     console.log(`  Config: ${path.join(PROJECT_DIR, "config", "synesis.yaml")}`);
     console.log(`\nRun 'synesis sync' to start extracting knowledge.`);
+  });
+
+const auth = program
+  .command("auth")
+  .description("Manage OAuth authentication for connectors");
+
+auth
+  .command("login")
+  .description("Authenticate with a provider")
+  .argument("<provider>", `Provider name (${listProviders().join(", ")})`)
+  .requiredOption("--client-id <id>", "OAuth client ID")
+  .requiredOption("--client-secret <secret>", "OAuth client secret")
+  .action(async (providerName: string, opts: { clientId: string; clientSecret: string }) => {
+    const provider = getProvider(providerName, opts.clientId, opts.clientSecret);
+    if (!provider) {
+      console.error(`Unknown provider: ${providerName}`);
+      console.log(`Available: ${listProviders().join(", ")}`);
+      process.exit(1);
+    }
+
+    const oauth = new OAuthManager(PROJECT_DIR);
+    await oauth.init();
+    await oauth.authenticate(provider);
+    console.log(`\nAuthenticated with ${providerName}.`);
+  });
+
+auth
+  .command("list")
+  .description("List authenticated providers")
+  .action(async () => {
+    const oauth = new OAuthManager(PROJECT_DIR);
+    await oauth.init();
+    const providers = await oauth.listAuthenticated();
+    if (providers.length === 0) {
+      console.log("No authenticated providers.");
+      console.log(`Available: ${listProviders().join(", ")}`);
+    } else {
+      console.log("Authenticated providers:");
+      for (const p of providers) {
+        console.log(`  - ${p}`);
+      }
+    }
+  });
+
+auth
+  .command("revoke")
+  .description("Revoke authentication for a provider")
+  .argument("<provider>", "Provider name")
+  .action(async (providerName: string) => {
+    const oauth = new OAuthManager(PROJECT_DIR);
+    await oauth.init();
+    const success = await oauth.revoke(providerName);
+    console.log(success ? `Revoked ${providerName}.` : `No auth found for ${providerName}.`);
   });
 
 program.parse();

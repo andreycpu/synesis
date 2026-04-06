@@ -50,3 +50,9 @@ connectors:
   claude_ai:
     enabled: false
     export_path: null
+  gmail:
+    enabled: false
+    client_id: null
+    client_secret: null
+    user_email: null
+    max_results: 50
