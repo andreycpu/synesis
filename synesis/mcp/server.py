@@ -182,13 +182,34 @@ def write_file(path: str, content: str) -> str:
 
 @mcp.tool()
 def orient() -> str:
-    """Call this first when connecting. Returns a summary of what's in the knowledge base
-    so you can orient quickly without scanning the whole directory."""
+    """Call this at session start. Returns the KB index and all learned rules
+    so you can immediately operate with full context."""
+    parts = []
+
+    # KB index
     index_path = KB_DIR / "_agent" / "index.md"
     if index_path.exists():
-        return index_path.read_text(encoding="utf-8")
-    # Generate if it doesn't exist yet
-    return generate_index(KB_DIR)
+        parts.append(index_path.read_text(encoding="utf-8"))
+    else:
+        parts.append(generate_index(KB_DIR))
+
+    # Learned rules - these should shape agent behavior
+    rules_path = KB_DIR / "_agent" / "rules.md"
+    if rules_path.exists():
+        rules = rules_path.read_text(encoding="utf-8").strip()
+        if rules:
+            parts.append("\n---\n")
+            parts.append(rules)
+
+    # Preferences
+    prefs_path = KB_DIR / "_agent" / "preferences.md"
+    if prefs_path.exists():
+        prefs = prefs_path.read_text(encoding="utf-8").strip()
+        if prefs:
+            parts.append("\n---\n")
+            parts.append(prefs)
+
+    return "\n".join(parts)
 
 
 @mcp.tool()
