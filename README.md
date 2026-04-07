@@ -20,33 +20,30 @@ Synesis takes the opposite approach: store the raw data as files, let agents nav
 
 ## Install
 
-One command. Takes about 60 seconds. After this, every Claude Code session automatically uses your conversation history and gets smarter over time.
+Open Claude Code and say:
+
+> install synesis
+
+That's it. The agent handles everything - downloads, configures the MCP server, syncs your conversation history, sets up auto-improvement. When it's done, restart Claude Code and every session from that point forward is smarter.
+
+Or if you prefer a manual install:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/andreycpu/synesis/main/install.sh | bash
 ```
 
-That's it. No config files to edit, no API keys to paste, no MCP servers to set up manually. The installer:
+### What happens after install
 
-1. Downloads Synesis
-2. Sets up the Python environment
-3. Configures the MCP server in Claude Code
-4. Adds agent instructions so Claude uses it automatically
-5. Runs the first sync of your conversation history
+You don't see anything different. Synesis runs silently in the background. But every Claude Code session now:
 
-After install, just open Claude Code and start working. The agent will silently use your history and improve over time.
-
-### What it looks like
-
-You don't see anything. Synesis runs in the background. But behind the scenes, every Claude Code session now:
-
-- Loads your learned rules and preferences on start
-- Checks past conversations before starting a task (so it doesn't repeat work or contradict past decisions)
-- Records new learnings about you as it works (so future sessions are smarter)
+- Knows your conversation history across all past sessions
+- Checks past decisions before starting a task (no repeated work, no contradictions)
+- Records learnings about you as it works (future sessions get smarter)
+- Builds up rules about your preferences, projects, and patterns over time
 
 ### Optional: connect more sources
 
-After install, run `synesis` to connect Gmail, Slack, Notion, etc:
+Run `synesis` in your terminal to connect Gmail, Slack, Notion, etc:
 
 ```
   SYNESIS  self-evolving agent memory
