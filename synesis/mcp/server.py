@@ -14,6 +14,12 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from synesis.agent.learner import append_learning, generate_index
+from synesis.agent.optimizer import (
+    install_hook as _install_hook,
+    install_agent_hook as _install_agent_hook,
+    add_instruction as _add_instruction,
+    create_script as _create_script,
+)
 from synesis.sync import SyncEngine
 
 PROJECT_DIR = Path(os.environ.get("SYNESIS_DIR", os.path.expanduser("~/synesis-data")))
@@ -281,6 +287,79 @@ def _human_size(size: int) -> str:
         return f"{size // 1024}K"
     else:
         return f"{size // (1024 * 1024)}M"
+
+
+# ---- Autonomous optimization tools ----
+# The agent uses these to modify the user's setup without asking.
+# Every change is logged to _agent/optimizations.md for auditability.
+
+@mcp.tool()
+def optimize_hook(
+    event: str,
+    matcher: str,
+    command: str,
+    timeout: int = 30,
+    reason: str = "",
+) -> str:
+    """Install a Claude Code hook to automate a repeated workflow.
+    Use this when you notice the user does something manually every time.
+
+    event: PreToolUse, PostToolUse, SessionStart, Notification
+    matcher: tool name or pattern (e.g. 'Bash', 'startup')
+    command: shell command to run
+    reason: why you're installing this (logged for auditability)
+    """
+    return _install_hook(event, matcher, command, timeout, reason)
+
+
+@mcp.tool()
+def optimize_agent_hook(
+    event: str,
+    matcher: str,
+    prompt: str,
+    reason: str = "",
+) -> str:
+    """Install an AI-powered hook that runs a review or check automatically.
+    Use this for things like security reviews, code quality checks, etc.
+
+    event: PreToolUse, PostToolUse
+    matcher: tool name (e.g. 'Bash' to catch git push)
+    prompt: instructions for the review agent
+    reason: why you're installing this
+    """
+    return _install_agent_hook(event, matcher, prompt, reason=reason)
+
+
+@mcp.tool()
+def optimize_instruction(instruction: str, reason: str = "") -> str:
+    """Add a persistent instruction to CLAUDE.md that shapes all future agent behavior.
+    Use this when you learn a preference or pattern that should apply globally.
+
+    instruction: the rule or behavior to add
+    reason: why (logged for auditability)
+    """
+    return _add_instruction(instruction, reason=reason)
+
+
+@mcp.tool()
+def optimize_script(name: str, content: str, reason: str = "") -> str:
+    """Create a reusable script at ~/.synesis/scripts/.
+    Use this to automate multi-step workflows the user does repeatedly.
+
+    name: script filename (e.g. 'pre-push-review.sh')
+    content: the script content
+    reason: why (logged for auditability)
+    """
+    return _create_script(name, content, reason)
+
+
+@mcp.tool()
+def view_optimizations() -> str:
+    """View the log of all autonomous optimizations the agent has made."""
+    log_path = KB_DIR / "_agent" / "optimizations.md"
+    if not log_path.exists():
+        return "No optimizations made yet."
+    return log_path.read_text(encoding="utf-8")
 
 
 def main():
