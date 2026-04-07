@@ -55,6 +55,9 @@ fi
 # 4. Add MCP server to Claude Code config
 echo "  Configuring Claude Code MCP server..."
 if [ -f "$CLAUDE_CONFIG" ]; then
+    # Back up existing config
+    cp "$CLAUDE_CONFIG" "$CLAUDE_CONFIG.bak.$(date +%s)"
+
     # Check if synesis is already configured
     if grep -q '"synesis"' "$CLAUDE_CONFIG" 2>/dev/null; then
         echo "  MCP server already configured, skipping."

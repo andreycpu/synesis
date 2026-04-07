@@ -84,6 +84,10 @@ def grep(pattern: str, path: str = "/", recursive: bool = True) -> str:
     if not target.exists():
         return f"Path not found: {path}"
 
+    # Reject obviously dangerous regex patterns
+    if len(pattern) > 200:
+        return "Pattern too long (max 200 chars)"
+
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
@@ -117,6 +121,9 @@ def grep_files(pattern: str, path: str = "/") -> str:
     target = _resolve(path)
     if not target.exists():
         return f"Path not found: {path}"
+
+    if len(pattern) > 200:
+        return "Pattern too long (max 200 chars)"
 
     try:
         regex = re.compile(pattern, re.IGNORECASE)

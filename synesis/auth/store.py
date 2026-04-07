@@ -13,6 +13,7 @@ class AuthStore:
 
     def init(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.dir, 0o700)
         key_file = self.dir / ".key"
 
         if key_file.exists():
