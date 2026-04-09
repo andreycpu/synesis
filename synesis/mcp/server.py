@@ -243,9 +243,31 @@ def orient(context: str = "") -> str:
             if results:
                 parts.append("\n---\n")
                 parts.append("# Relevant Rules (ranked by ML)")
+
+                # Load contradictions to annotate conflicting rules
+                contradiction_map: dict[str, list[str]] = {}
+                try:
+                    from synesis.ml.contradictions import ContradictionDetector
+                    detector = ContradictionDetector(ML_DIR, KB_DIR)
+                    for c in detector.get_active_contradictions():
+                        contradiction_map.setdefault(c.rule_a_id, []).append(c.rule_b_text[:60])
+                        contradiction_map.setdefault(c.rule_b_id, []).append(c.rule_a_text[:60])
+                except Exception:
+                    pass
+
                 for r in results:
+                    flags = []
+                    if r.get("stale"):
+                        flags.append("STALE")
+                    if r["rule_id"] in contradiction_map:
+                        flags.append("CONFLICTED")
+                    flag_str = f" [{','.join(flags)}]" if flags else ""
                     score_str = f"[score={r['combined']}]"
-                    parts.append(f"- {score_str} {r['text']}")
+                    parts.append(f"- {score_str}{flag_str} {r['text']}")
+
+                    if r["rule_id"] in contradiction_map:
+                        for conflict in contradiction_map[r["rule_id"]]:
+                            parts.append(f"  ^ conflicts with: \"{conflict}\"")
         except Exception:
             retriever = None  # Fall through to raw rules
 
@@ -272,8 +294,32 @@ def orient(context: str = "") -> str:
 def learn(rule: str) -> str:
     """Record something you've learned about the user or their preferences.
     This gets appended to the agent rules file for future sessions.
-    Example: learn('user prefers concise responses over detailed ones')"""
-    return append_learning(KB_DIR, rule)
+    Example: learn('user prefers concise responses over detailed ones')
+
+    If ML is available, checks for contradictions with existing rules.
+    Returns a warning if a contradiction is detected."""
+    result = append_learning(KB_DIR, rule)
+
+    # Check for contradictions with existing rules
+    if _check_ml():
+        try:
+            from synesis.ml.contradictions import ContradictionDetector
+            detector = ContradictionDetector(ML_DIR, KB_DIR)
+            contradictions = detector.check_new_rule(rule)
+            if contradictions:
+                warnings = []
+                for c in contradictions:
+                    warnings.append(
+                        f"CONTRADICTION: new rule \"{c.rule_a_text[:60]}\" "
+                        f"conflicts with existing \"{c.rule_b_text[:60]}\" "
+                        f"(similarity={c.similarity})"
+                    )
+                result += "\n\nWARNING - contradictions detected:\n" + "\n".join(warnings)
+                result += "\nUse review_stale_rules() to see and resolve contradictions."
+        except Exception:
+            pass  # Don't block learn() if contradiction check fails
+
+    return result
 
 
 @mcp.tool()
@@ -342,6 +388,101 @@ def ml_status() -> str:
     trainer = Trainer(ML_DIR, KB_DIR)
     status = trainer.get_status()
     return _json.dumps(status, indent=2, default=str)
+
+
+@mcp.tool()
+def search_conversations(query: str, k: int = 5) -> str:
+    """Semantic search over past conversations in the knowledge base.
+
+    Finds the most relevant conversations by topic similarity, not keyword matching.
+    Returns file paths and snippets. Use cat() to read the full conversation.
+
+    query: what you're looking for (e.g. 'CRE deal analysis discussion')
+    k: number of results to return
+    """
+    if not _check_ml():
+        return "ML dependencies not installed. Run: pip install synesis[ml]"
+
+    import json as _json
+    from synesis.ml.conversation_index import ConversationIndex
+
+    index = ConversationIndex(ML_DIR, KB_DIR)
+    results = index.search(query, k=k)
+
+    if not results:
+        return "No conversations indexed yet. Run `synesis train` to build the index."
+
+    lines = [f"Found {len(results)} relevant conversations:\n"]
+    for r in results:
+        lines.append(f"  [{r['similarity']:.3f}] {r['path']}")
+        lines.append(f"         {r['snippet'][:120]}...")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def review_stale_rules() -> str:
+    """Review rules that haven't received feedback in 30+ days.
+
+    Returns stale rules for you to re-evaluate. For each rule, you should
+    either reconfirm it (call learn() with the same text) or let it decay.
+    Also shows active contradictions that need resolution.
+    """
+    if not _check_ml():
+        return "ML dependencies not installed. Run: pip install synesis[ml]"
+
+    import json as _json
+    from synesis.ml.scorer import RuleScorer
+    from synesis.ml.contradictions import ContradictionDetector
+
+    scorer = RuleScorer(ML_DIR)
+    texts_path = ML_DIR / "rule_texts.json"
+    texts = {}
+    if texts_path.exists():
+        try:
+            texts = _json.loads(texts_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    lines = []
+
+    # Stale rules
+    stale_rules = []
+    for rule_id, score_data in scorer.all_scores().items():
+        if score_data.days_since_validated > 30:
+            stale_rules.append((rule_id, score_data))
+
+    if stale_rules:
+        stale_rules.sort(key=lambda x: x[1].days_since_validated, reverse=True)
+        lines.append(f"## Stale Rules ({len(stale_rules)} rules with no feedback in 30+ days)\n")
+        for rule_id, sd in stale_rules:
+            text = texts.get(rule_id, "unknown")
+            days = sd.days_since_validated
+            days_str = f"{days:.0f}" if days != float("inf") else "never"
+            lines.append(f"- [{rule_id}] {text}")
+            lines.append(f"  Last validated: {days_str} days ago | "
+                         f"Score: {sd.mean_reward:.2f} | "
+                         f"Used: {sd.times_pulled}x")
+            lines.append("")
+    else:
+        lines.append("No stale rules found.\n")
+
+    # Active contradictions
+    try:
+        detector = ContradictionDetector(ML_DIR, KB_DIR)
+        active = detector.get_active_contradictions()
+        if active:
+            lines.append(f"\n## Active Contradictions ({len(active)})\n")
+            for c in active:
+                lines.append(f"- \"{c.rule_a_text[:80]}\"")
+                lines.append(f"  vs \"{c.rule_b_text[:80]}\"")
+                lines.append(f"  Similarity: {c.similarity} | Detected: {c.detected[:10]}")
+                lines.append("")
+    except Exception:
+        pass
+
+    return "\n".join(lines) if lines else "No stale rules or contradictions."
 
 
 @mcp.tool()

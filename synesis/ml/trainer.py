@@ -1,18 +1,9 @@
 """Auto-research style training loop for retrieval optimization.
 
-Like Karpathy's autoresearch: run experiments, measure metrics,
-keep improvements, discard failures, iterate. But instead of
-training a language model, we optimize the retrieval system.
-
 The "model" is the retrieval pipeline (embeddings + scorer + reward model).
-The "metric" is retrieval quality measured against held-out feedback.
+The "metric" is outcome-based: did the retriever surface rules that led to
+good outcomes (accepted) and suppress rules that led to bad outcomes (corrected)?
 The "training loop" searches for better parameters and retrains components.
-
-v2 changes:
-- Proper train/test split (no circular evaluation)
-- Staleness and contradiction detection integrated
-- Feedback attribution via retrieval ledger
-- Confidence-weighted scoring
 """
 from __future__ import annotations
 
@@ -51,18 +42,7 @@ class Trainer:
         ml_dir.mkdir(parents=True, exist_ok=True)
 
     def run_training_loop(self) -> dict:
-        """Full training pipeline.
-
-        Steps:
-        1. Extract feedback from recent sessions (with dedup)
-        2. Attribute feedback to rules via retrieval ledger + embeddings
-        3. Update scorer with attributed, confidence-weighted feedback
-        4. Detect staleness and contradictions
-        5. Rebuild embedding index
-        6. Retrain reward model
-        7. Run parameter search with proper train/test split
-        8. Consolidate rules (merge, prune, extract)
-        """
+        """Full training pipeline."""
         from synesis.ml.scorer import RuleScorer
         from synesis.ml.feedback import FeedbackExtractor
         from synesis.ml.reward_model import RewardModel
@@ -72,9 +52,9 @@ class Trainer:
 
         summary = {"timestamp": datetime.now().isoformat(), "steps": {}}
 
-        # Step 1: Extract feedback (with session dedup)
+        # Step 1: Extract feedback (with session dedup + rule attribution)
         logger.info("Step 1: Extracting feedback from sessions...")
-        extractor = FeedbackExtractor(self._ml_dir)
+        extractor = FeedbackExtractor(self._ml_dir, kb_dir=self._kb_dir)
         sessions_dir = Path.home() / ".claude" / "projects"
         new_signals = extractor.extract_from_directory(sessions_dir)
         saved = extractor.save_feedback(new_signals)
@@ -86,9 +66,11 @@ class Trainer:
             "avg_confidence": round(
                 sum(f.confidence for f in all_feedback) / max(len(all_feedback), 1), 3
             ),
+            "attributed": sum(1 for s in new_signals if s.rule_ids),
+            "unattributed": sum(1 for s in new_signals if not s.rule_ids),
         }
 
-        # Step 2: Update scorer with confidence-weighted feedback
+        # Step 2: Update scorer with attributed, confidence-weighted feedback
         logger.info("Step 2: Updating rule scores...")
         scorer = RuleScorer(self._ml_dir)
         score_updates = 0
@@ -108,11 +90,7 @@ class Trainer:
                     score_updates += 1
 
         scorer.decay_scores(factor=0.98)
-        summary["steps"]["scoring"] = {
-            "updates": score_updates,
-            "attributed_signals": sum(1 for s in new_signals if s.rule_ids),
-            "unattributed_signals": sum(1 for s in new_signals if not s.rule_ids),
-        }
+        summary["steps"]["scoring"] = {"updates": score_updates}
 
         # Step 3: Detect staleness and contradictions
         logger.info("Step 3: Detecting staleness and contradictions...")
@@ -170,7 +148,7 @@ class Trainer:
         reward_result = reward_model.train(all_feedback, scorer)
         summary["steps"]["reward_model"] = reward_result
 
-        # Step 6: Parameter search with train/test split
+        # Step 6: Parameter search with proper train/test split
         logger.info("Step 6: Running parameter search...")
         attributed = [f for f in all_feedback if f.rule_ids]
         if len(attributed) >= 10:
@@ -186,7 +164,7 @@ class Trainer:
         else:
             summary["steps"]["param_search"] = {
                 "status": "skipped",
-                "reason": f"need 10+ attributed feedback signals, have {len(attributed)}",
+                "reason": f"need 10+ attributed signals, have {len(attributed)}",
             }
 
         # Step 7: Consolidate rules
@@ -200,9 +178,20 @@ class Trainer:
             "new_patterns": consol_result.get("patterns", []),
         }
 
-        # Step 8: Rebuild index if rules changed
+        # Step 8: Build conversation index
+        logger.info("Step 8: Building conversation index...")
+        try:
+            from synesis.ml.conversation_index import ConversationIndex
+            conv_index = ConversationIndex(self._ml_dir, self._kb_dir)
+            n_convos = conv_index.build_index()
+            summary["steps"]["conversation_index"] = {"conversations_indexed": n_convos}
+        except Exception as e:
+            logger.warning(f"Conversation indexing failed: {e}")
+            summary["steps"]["conversation_index"] = {"error": str(e)}
+
+        # Step 9: Rebuild rule index if rules changed
         if consol_result.get("merges") or consol_result.get("pruned"):
-            logger.info("Step 8: Rebuilding index after consolidation...")
+            logger.info("Step 9: Rebuilding rule index after consolidation...")
             n_rules = retriever.index_rules()
             summary["steps"]["reindex"] = {"rules_indexed": n_rules}
 
@@ -212,22 +201,22 @@ class Trainer:
     def run_experiment(self, params: dict, test_feedback: list) -> Experiment:
         """Test a parameter set against held-out test feedback.
 
-        The metric: for each attributed feedback signal, did the retriever
-        rank the attributed rule highly?
-
-        This is NOT circular because:
-        - Feedback signals have rule_ids from the retrieval ledger (what was actually served)
-        - We evaluate whether a DIFFERENT parameter set would rank those same rules
-        - The test set is held out from any training
+        Outcome-based metric:
+        - For POSITIVE signals (accepted/completed) with known rule_ids:
+          check if that rule_id appears in top-k retrieval. Hit = good.
+        - For NEGATIVE signals (corrected) with known rule_ids:
+          check if that rule_id is NOT in top-k retrieval. Absence = good.
+        This measures whether the retriever correctly surfaces helpful rules
+        and suppresses harmful ones.
         """
         from synesis.ml.retriever import SemanticRetriever
 
         start = time.time()
         retriever = SemanticRetriever(self._ml_dir, self._kb_dir)
 
-        hits_at_k = 0
-        dcg_total = 0.0
+        correct = 0
         n_evaluated = 0
+        dcg_total = 0.0
 
         k = params.get("k", 5)
 
@@ -248,21 +237,31 @@ class Trainer:
             n_evaluated += 1
             retrieved_ids = [r["rule_id"] for r in results]
 
-            # Check if the attributed rule appears in results
-            for target_id in signal.rule_ids:
-                if target_id in retrieved_ids:
-                    rank = retrieved_ids.index(target_id) + 1
-                    hits_at_k += 1
-                    dcg_total += 1.0 / np.log2(rank + 1)
-                    break
+            if signal.signal_type in ("accepted", "completed"):
+                # Positive: the attributed rule SHOULD be in top-k
+                for target_id in signal.rule_ids:
+                    if target_id in retrieved_ids:
+                        rank = retrieved_ids.index(target_id) + 1
+                        correct += 1
+                        dcg_total += 1.0 / np.log2(rank + 1)
+                        break
+            elif signal.signal_type == "corrected":
+                # Negative: the attributed rule should NOT be in top-k
+                found_bad = False
+                for target_id in signal.rule_ids:
+                    if target_id in retrieved_ids:
+                        found_bad = True
+                        break
+                if not found_bad:
+                    correct += 1  # Correctly suppressed the bad rule
 
         duration = time.time() - start
 
         metrics = {
-            "precision_at_k": round(hits_at_k / max(n_evaluated, 1), 4),
+            "accuracy": round(correct / max(n_evaluated, 1), 4),
             "mean_dcg": round(dcg_total / max(n_evaluated, 1), 4),
             "n_evaluated": n_evaluated,
-            "hit_rate": round(hits_at_k / max(n_evaluated, 1), 4),
+            "correct": correct,
         }
 
         exp_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hash(str(params)) % 10000:04d}"
@@ -278,12 +277,7 @@ class Trainer:
         return exp
 
     def search_params(self, feedback: list, n_trials: int = 15) -> Experiment | None:
-        """Grid search with proper train/test split.
-
-        Splits feedback 70/30. Trains on 70%, evaluates on 30%.
-        Never evaluates on the same data it optimizes against.
-        """
-        # Proper train/test split
+        """Grid search with proper train/test split."""
         rng = np.random.default_rng(42)
         indices = rng.permutation(len(feedback))
         split = int(len(feedback) * 0.7)
@@ -313,14 +307,13 @@ class Trainer:
         best: Experiment | None = None
         for params in combos:
             exp = self.run_experiment(params, test_set)
-            if best is None or exp.metrics["mean_dcg"] > best.metrics["mean_dcg"]:
+            if best is None or exp.metrics["accuracy"] > best.metrics["accuracy"]:
                 best = exp
 
-        # Compare against current config
         current_config = self.load_config()
         if current_config:
             baseline = self.run_experiment(current_config, test_set)
-            if best and best.metrics["mean_dcg"] <= baseline.metrics["mean_dcg"]:
+            if best and best.metrics["accuracy"] <= baseline.metrics["accuracy"]:
                 logger.info("Current config is still best.")
                 return None
 
@@ -354,7 +347,7 @@ class Trainer:
         from synesis.ml.reward_model import RewardModel
 
         scorer = RuleScorer(self._ml_dir)
-        extractor = FeedbackExtractor(self._ml_dir)
+        extractor = FeedbackExtractor(self._ml_dir, kb_dir=self._kb_dir)
         feedback = extractor.load_feedback()
 
         attributed = sum(1 for f in feedback if f.rule_ids)
@@ -372,6 +365,15 @@ class Trainer:
             "faiss_index_exists": (self._ml_dir / "faiss.index").exists(),
             "n_experiments": self._count_experiments(),
         }
+
+        # Stale rules count
+        try:
+            from synesis.ml.staleness import StalenessDetector
+            detector = StalenessDetector(self._ml_dir, self._kb_dir)
+            stale = detector.detect_stale()
+            status["n_stale_rules"] = len(stale)
+        except Exception:
+            pass
 
         top = scorer.get_top_rules(5)
         if top:

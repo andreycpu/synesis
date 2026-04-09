@@ -96,6 +96,13 @@ class SemanticRetriever:
 
             self._scorer.ensure_rule(rule_id)
 
+            # Deprioritize stale rules (no feedback in 30+ days)
+            score_data = self._scorer.get_score_data(rule_id)
+            is_stale = False
+            if score_data and score_data.days_since_validated > 30:
+                combined *= 0.5
+                is_stale = True
+
             ranked.append({
                 "rule_id": rule_id,
                 "text": texts.get(rule_id, ""),
@@ -103,6 +110,7 @@ class SemanticRetriever:
                 "ucb_score": round(ucb_norm, 4),
                 "reward_prediction": round(reward_pred, 4) if reward_pred else None,
                 "combined": round(combined, 4),
+                "stale": is_stale,
             })
 
         ranked.sort(key=lambda x: x["combined"], reverse=True)

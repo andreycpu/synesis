@@ -25,6 +25,7 @@ class RuleScore:
     times_corrected: int = 0
     last_used: str = ""
     created: str = ""
+    last_validated: str = ""  # last time this rule received any feedback signal
 
     @property
     def mean_reward(self) -> float:
@@ -37,6 +38,16 @@ class RuleScore:
         if self.times_pulled == 0:
             return 0.0
         return self.times_success / self.times_pulled
+
+    @property
+    def days_since_validated(self) -> float:
+        if not self.last_validated:
+            return float("inf")
+        try:
+            dt = datetime.fromisoformat(self.last_validated)
+            return (datetime.now() - dt).total_seconds() / 86400
+        except Exception:
+            return float("inf")
 
 
 class RuleScorer:
@@ -70,7 +81,9 @@ class RuleScorer:
         s = self.ensure_rule(rule_id)
         s.total_reward += reward
         s.times_pulled += 1
-        s.last_used = datetime.now().isoformat()
+        now = datetime.now().isoformat()
+        s.last_used = now
+        s.last_validated = now  # any feedback = validation
         if reward > 0:
             s.times_success += 1
         self._total_pulls += 1
