@@ -157,13 +157,18 @@ def _show_status():
         click.echo()
 
 
-@click.command()
+@click.group(invoke_without_command=True)
 @click.version_option("0.1.0")
-def cli():
+@click.pass_context
+def cli(ctx):
     """Synesis - self-evolving agent memory system.
 
     Just run `synesis`. It handles everything.
+    Subcommands: synesis train, synesis status
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
     PROJECT_DIR.mkdir(parents=True, exist_ok=True)
     _header()
 
@@ -211,6 +216,113 @@ def cli():
     except KeyboardInterrupt:
         click.echo()
         _log("stopped", "dim")
+
+
+@cli.command(name="train")
+def train_cmd():
+    """Run the ML training loop.
+
+    Extracts feedback from sessions, retrains the reward model,
+    optimizes retrieval parameters, and consolidates rules.
+    This is the self-improvement cycle - like Karpathy's autoresearch
+    but for agent memory retrieval.
+    """
+    import json
+
+    _header()
+    ML_DIR = PROJECT_DIR / "ml"
+
+    try:
+        from synesis.ml.trainer import Trainer
+    except ImportError:
+        _log("ML dependencies not installed. Run: pip install synesis[ml]", "err")
+        return
+
+    _log("starting training loop...")
+    trainer = Trainer(ML_DIR, PROJECT_DIR / "knowledge")
+
+    try:
+        result = trainer.run_training_loop()
+    except Exception as e:
+        _log(f"training failed: {e}", "err")
+        raise
+
+    # Print results
+    steps = result.get("steps", {})
+
+    fb = steps.get("feedback", {})
+    _log(f"feedback: {fb.get('new_signals', 0)} new, {fb.get('total_feedback', 0)} total", "ok")
+
+    scoring = steps.get("scoring", {})
+    _log(f"scores updated: {scoring.get('updates', 0)}", "ok")
+
+    indexing = steps.get("indexing", {})
+    _log(f"rules indexed: {indexing.get('rules_indexed', 0)}", "ok")
+
+    reward = steps.get("reward_model", {})
+    if reward.get("status") == "trained":
+        _log(f"reward model: accuracy={reward.get('accuracy', 0):.3f}, n={reward.get('n_samples', 0)}", "ok")
+    else:
+        _log(f"reward model: {reward.get('status', 'skipped')} ({reward.get('reason', reward.get('min_required', ''))})", "dim")
+
+    params = steps.get("param_search", {})
+    if params.get("best_params"):
+        _log(f"best params: {params['best_params']}", "ok")
+    else:
+        _log(f"param search: {params.get('status', 'skipped')}", "dim")
+
+    consol = steps.get("consolidation", {})
+    _log(f"consolidation: {consol.get('merges', 0)} merges, {consol.get('pruned', 0)} pruned, {consol.get('patterns_found', 0)} patterns", "ok")
+
+    if consol.get("new_patterns"):
+        click.echo()
+        _log("discovered patterns:", "warn")
+        for p in consol["new_patterns"]:
+            click.echo(f"    {p}")
+
+    click.echo()
+    _log("training complete", "ok")
+
+
+@cli.command(name="status")
+def status_cmd():
+    """Show ML system metrics and current state."""
+    import json
+
+    _header()
+    ML_DIR = PROJECT_DIR / "ml"
+
+    try:
+        from synesis.ml.trainer import Trainer
+    except ImportError:
+        _log("ML dependencies not installed. Run: pip install synesis[ml]", "err")
+        return
+
+    trainer = Trainer(ML_DIR, PROJECT_DIR / "knowledge")
+    status = trainer.get_status()
+
+    _log(f"rules scored: {status.get('n_rules_scored', 0)}", "ok")
+    _log(f"feedback signals: {status.get('n_feedback', 0)}", "ok")
+
+    by_type = status.get("feedback_by_type", {})
+    if by_type:
+        parts = [f"{v} {k}" for k, v in sorted(by_type.items())]
+        _log(f"  breakdown: {', '.join(parts)}", "dim")
+
+    _log(f"reward model trained: {status.get('reward_model_trained', False)}", "ok")
+    _log(f"FAISS index: {'exists' if status.get('faiss_index_exists') else 'not built'}", "ok")
+    _log(f"experiments run: {status.get('n_experiments', 0)}", "ok")
+
+    config = status.get("best_config", {})
+    if config:
+        _log(f"best config: emb_w={config.get('embedding_weight', '?')}, score_w={config.get('score_weight', '?')}, k={config.get('k', '?')}", "ok")
+
+    top = status.get("top_rules", [])
+    if top:
+        click.echo()
+        _log("top rules:", "warn")
+        for r in top:
+            click.echo(f"    [{r['score']:.2f}] {r['text']}")
 
 
 if __name__ == "__main__":

@@ -1,20 +1,60 @@
 # Synesis
 
-Your conversations, emails, and messages - stored as files on your machine. Any AI agent can navigate them with `grep`, `cat`, `tree`, and `find`.
+Self-evolving agent memory. Stores your conversations as files, then uses local ML models to learn which memories matter, score them, and improve its own retrieval over time.
 
-No LLM extraction. No database. No cloud. Just your raw data as a filesystem that agents already know how to use.
+No cloud. No LLM in the learning loop. The self-improvement runs entirely on your machine using sentence-transformers, FAISS, and scikit-learn.
 
 ---
 
-## Why not LLM extraction?
+## How it works
 
-Most knowledge base tools run an LLM over your data to "extract" structured knowledge. This is wrong for three reasons:
+Synesis has two layers:
 
-1. **It's lossy.** The LLM decides at sync time what's important and throws away the rest. Context that matters later gets discarded now.
-2. **It's expensive.** Every sync cycle burns API credits to process conversations you already have.
-3. **It's unnecessary.** Agents are pre-trained on billions of tokens of filesystem interactions. `grep`, `cat`, `tree`, `find` - these aren't tools agents learn to use. They're tools agents already know.
+**Layer 1: Raw data as files.** Your conversations, emails, and messages are stored as markdown files on your machine. Agents navigate them with `grep`, `cat`, `tree` - tools they already know.
 
-Synesis takes the opposite approach: store the raw data as files, let agents navigate it at query time. The filesystem is the interface.
+**Layer 2: ML self-improvement.** A local training loop that learns from how agents use the data. It scores rules, embeds them semantically, trains a reward model, and optimizes its own retrieval parameters - like [Karpathy's autoresearch](https://github.com/karpathy/autoresearch), but for memory retrieval instead of language model training.
+
+### The self-improvement loop
+
+```
+Session N: agent retrieves rules, acts on them
+    |
+    v
+Feedback extraction: parse session for corrections/acceptances (regex, no LLM)
+    |
+    v
+Score update: UCB1 bandit adjusts rule scores based on outcomes
+    |
+    v
+Reward model: logistic regression learns to predict rule utility
+    |
+    v
+Parameter search: grid search over retrieval weights, keep improvements
+    |
+    v
+Rule consolidation: cluster duplicates, prune dead rules, extract patterns
+    |
+    v
+Session N+1: better retrieval, higher-scoring rules surface first
+```
+
+Each cycle makes the next one better. The system has a concrete metric (retrieval precision against feedback), modifies its own parameters, runs experiments, and only keeps improvements.
+
+---
+
+## The ML stack (no LLM calls)
+
+| Component | What it does | ML technique |
+|---|---|---|
+| **Embeddings** | Semantic understanding of rules | sentence-transformers (all-MiniLM-L6-v2) |
+| **Index** | Fast similarity search | FAISS (IndexFlatIP, cosine similarity) |
+| **Scorer** | Balance exploitation vs exploration | UCB1 multi-armed bandit |
+| **Feedback** | Extract signals from sessions | Regex pattern matching on conversation structure |
+| **Reward model** | Predict rule utility in context | Logistic regression (774d features: rule emb + context emb + behavioral signals) |
+| **Consolidator** | Merge duplicates, prune dead rules | Agglomerative clustering on embeddings, TF-IDF pattern extraction |
+| **Trainer** | Optimize retrieval parameters | Grid search with held-out evaluation (precision@k, NDCG) |
+
+All models run locally. The sentence-transformer downloads once (~90MB) and runs on CPU.
 
 ---
 
@@ -24,180 +64,255 @@ Open Claude Code and say:
 
 > install synesis
 
-That's it. The agent handles everything - downloads, configures the MCP server, syncs your conversation history, sets up auto-improvement. When it's done, restart Claude Code and every session from that point forward is smarter.
+That's it. The agent handles everything. When it's done, restart Claude Code.
 
-Or if you prefer a manual install:
+Or manually:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/andreycpu/synesis/main/install.sh | bash
 ```
 
+### Install ML dependencies
+
+The base system works without ML (falls back to grep-based retrieval). To enable self-improvement:
+
+```bash
+cd ~/.synesis && .venv/bin/pip install -e ".[ml]"
+```
+
 ### What happens after install
 
-You don't see anything different. Synesis runs silently in the background. But every Claude Code session now:
+You don't see anything different. Synesis runs silently. But every Claude Code session now:
 
 - Knows your conversation history across all past sessions
-- Checks past decisions before starting a task (no repeated work, no contradictions)
-- Records learnings about you as it works (future sessions get smarter)
-- Builds up rules about your preferences, projects, and patterns over time
+- Retrieves the most relevant rules using semantic search (not keyword matching)
+- Records learnings and scores them based on outcomes
+- Gets measurably better at retrieval over time
 
 ### Optional: connect more sources
 
-Run `synesis` in your terminal to connect Gmail, Slack, Notion, etc:
+Run `synesis` in your terminal to connect Gmail, Slack, Notion, etc.
+
+---
+
+## Usage
+
+### Training (the self-improvement cycle)
+
+```bash
+synesis train
+```
+
+This runs the full pipeline:
+1. Extracts feedback signals from your Claude Code sessions
+2. Updates UCB1 bandit scores for each rule
+3. Rebuilds the FAISS embedding index
+4. Retrains the reward model (if enough data)
+5. Grid-searches retrieval parameters against held-out feedback
+6. Consolidates rules (merge duplicates, prune dead weight, extract patterns)
+
+Run it periodically - weekly is a good cadence. Each run makes retrieval better.
 
 ```
   SYNESIS  self-evolving agent memory
   ------------------------------------------
 
-  Let's set you up. This takes about 30 seconds.
+  21:26:25  starting training loop...
+  21:26:40  feedback: 4 new, 47 total
+  21:26:40  scores updated: 12
+  21:26:40  rules indexed: 23
+  21:26:40  reward model: accuracy=0.742, n=47
+  21:26:40  best params: {'embedding_weight': 0.8, 'score_weight': 0.2, 'k': 5}
+  21:26:40  consolidation: 2 merges, 1 pruned, 3 patterns
 
-  + Claude Code (auto-detected, no setup needed)
-
-  What else do you want to connect?
-
-  Gmail + Google Calendar + Drive (emails, calendar events, documents)? [y/N]: y
-  Client ID for Gmail: ****
-  Client Secret for Gmail: ****
-  Opening browser...
-  + Gmail connected
-
-  Slack (messages and channels)? [y/N]: n
-  ...
-
-  Setup complete. You won't need to do this again.
+  21:26:40  training complete
 ```
 
-After that, it syncs and runs forever. No API keys needed for the core system. No LLM in the loop.
+### Status
 
----
-
-## What happens
-
-1. **Syncs** your sources - reads Claude Code conversations from disk, calls Gmail/Slack/etc APIs from your machine
-2. **Writes** each conversation as a markdown file in `~/synesis-data/knowledge/`
-3. **Sleeps** until the next cycle (every 12 hours by default)
-
-That's it. No extraction, no summarization, no processing. The raw data is the knowledge base.
-
----
-
-## How agents use it
-
-Add to `~/.claude.json`:
-
-```json
-{
-  "mcpServers": {
-    "synesis": {
-      "command": "synesis-mcp",
-      "env": { "SYNESIS_DIR": "~/synesis-data" }
-    }
-  }
-}
+```bash
+synesis status
 ```
 
-Now any Claude Code session can navigate your full conversation history:
+Shows current ML metrics: rules scored, feedback signals, model accuracy, best parameters, top-performing rules.
 
-```
-# Orient - what's in the knowledge base?
-tree /
-
-# Find files that mention a topic
-grep_files "CRE strategy"
-
-# Read a specific conversation
-cat claude_code/abc123.md
-
-# Search for exact content
-grep "Invesco" /
-
-# Find files by name
-find "*strategy*"
-```
-
-Agents already know this workflow: `tree` to orient, `grep` to find, `cat` to read. It's how every developer navigates a codebase. The knowledge base is just another directory.
-
-### MCP tools
+### MCP tools (used by agents automatically)
 
 | Tool | What it does |
 |---|---|
+| `orient(context)` | Session start - returns relevant rules via ML retrieval |
+| `learn(rule)` | Record a new rule (gets scored and embedded) |
+| `feedback(signal_type, ...)` | Record a feedback signal (accepted/corrected/ignored) |
+| `train()` | Trigger the training loop from within a session |
+| `ml_status()` | Show ML system state |
 | `tree` | Show directory structure |
 | `cat` | Read a file |
 | `grep` | Search file contents (regex) |
-| `grep_files` | List files matching a pattern (like `grep -rl`) |
-| `ls` | List directory contents |
-| `find` | Find files by name (glob) |
-| `write_file` | Write a file (agents can contribute) |
-| `sync` | Trigger a sync |
-| `stats` | File counts by source |
+| `grep_files` | List files matching a pattern |
+| `ls` / `find` / `write_file` / `sync` / `stats` | Standard filesystem + sync tools |
+
+### Autonomous optimization
+
+Agents can also modify your setup when they notice patterns:
+
+| Tool | What it does |
+|---|---|
+| `optimize_hook` | Install a Claude Code hook to automate repeated workflows |
+| `optimize_agent_hook` | Install an AI-powered review hook |
+| `optimize_instruction` | Add a persistent rule to CLAUDE.md |
+| `optimize_script` | Create a reusable script |
+| `view_optimizations` | See what the agent has changed (audit log) |
+
+All modifications are validated against allowlists/blocklists and logged to `_agent/optimizations.md`.
 
 ---
 
-## How context bloat is prevented
+## Architecture
 
-The filesystem approach solves context bloat naturally:
+### How retrieval works (with ML)
 
-**Agents only load what they need.** An agent doesn't dump the entire KB into context. It runs `grep_files "topic"` to find 3 relevant files out of 5,000, then `cat`s those 3. The other 4,997 are never loaded.
+When an agent calls `orient(context="working on CRE deal analysis")`:
 
-**The data is already structured.** Conversations are organized by source (`claude_code/`, `gmail/`, `slack/`). Each file has frontmatter with metadata. Agents can narrow their search to a specific source directory.
+1. **Embed** the context using sentence-transformers (384d vector)
+2. **Search** FAISS index for the 15 nearest rules by cosine similarity
+3. **Score** each candidate: `combined = 0.7 * similarity + 0.3 * ucb_score`
+4. If reward model is trained: blend in `P(useful | rule, context)` prediction
+5. Return top 5 rules ranked by combined score
 
-**No compression needed.** Since agents navigate the raw files at query time, there's nothing to compress. The filesystem can grow unbounded - agents just grep through it.
+The weights (0.7, 0.3) are themselves optimized by the training loop.
+
+### How scoring works (UCB1 bandit)
+
+Each rule is an "arm" in a multi-armed bandit:
+
+- **Pulling** = retrieving the rule for a session
+- **Reward** = positive feedback (user accepted, task completed)
+- **Penalty** = negative feedback (user corrected, rule ignored)
+- **UCB1 formula**: `mean_reward + sqrt(2 * ln(total_pulls) / rule_pulls)`
+
+This naturally balances using high-performing rules (exploitation) with trying under-tested rules (exploration). New rules get an exploration bonus. Consistently bad rules sink to the bottom and eventually get pruned.
+
+### How feedback extraction works (no LLM)
+
+The feedback extractor parses JSONL conversation files looking for structural patterns:
+
+- **Correction detected**: user message contains "no", "don't", "wrong", "actually", "instead", "revert" etc. after an assistant message
+- **Acceptance detected**: user message contains "thanks", "perfect", "exactly", "lgtm", "looks good" etc.
+- **Completion detected**: session ends with positive user message
+
+12 correction patterns and 10 positive patterns, all regex-based. No ambiguity, no LLM interpretation needed.
+
+### How the reward model works
+
+A logistic regression trained on feedback data. Feature vector (774 dimensions):
+
+- Rule embedding (384d) - what the rule says
+- Context embedding (384d) - what the session is about
+- Cosine similarity (1d) - how relevant the rule is to context
+- Rule age in days (1d)
+- Mean reward (1d) - historical performance
+- Times pulled (1d)
+- Times corrected (1d)
+- Success rate (1d)
+
+Predicts `P(useful)` - the probability that retrieving this rule in this context leads to positive feedback. Requires 10+ feedback signals to train. Uses balanced class weights to handle imbalanced data.
+
+### How consolidation works
+
+1. **Cluster** rules using agglomerative clustering on embeddings (cosine distance, threshold=0.15)
+2. **Merge** near-duplicates: keep highest-scored rule in each cluster, remove the rest
+3. **Prune** rules with `mean_reward < -0.5` after 5+ uses
+4. **Extract** new rule candidates via TF-IDF over correction contexts (what does the agent keep getting wrong?)
+
+### How parameter search works
+
+Like autoresearch but for retrieval:
+
+1. Define parameter grid: `embedding_weight`, `score_weight`, `k`
+2. For each combination: run retriever against held-out feedback, measure precision@k and NDCG
+3. Compare against current best config
+4. Only save new config if it beats the baseline
+
+All experiments are logged to `ml/experiments.jsonl` for auditability.
 
 ---
 
-## Where data lives
+## Project structure
+
+```
+synesis/
+  ml/               # Self-improvement (the ML layer)
+    embeddings.py    # Sentence-transformers + FAISS
+    scorer.py        # UCB1 multi-armed bandit
+    feedback.py      # Signal extraction from sessions
+    reward_model.py  # Logistic regression utility predictor
+    consolidator.py  # Clustering + pruning + pattern extraction
+    retriever.py     # Combined ranking pipeline
+    trainer.py       # Auto-research training loop
+  agent/             # Agent self-modification
+    learner.py       # Rules and index management
+    optimizer.py     # Hook/instruction/script installation
+  auth/              # OAuth (PKCE, encrypted token storage)
+  connectors/        # Source plugins (Claude Code, Gmail, etc.)
+  kb/                # Knowledge base types and storage
+  config/            # Configuration manager
+  sync/              # Sync engine (raw file writer)
+  mcp/               # MCP server (all tools)
+  cli.py             # CLI: synesis, synesis train, synesis status
+```
+
+### Data directory
 
 ```
 ~/synesis-data/
-  config/synesis.yaml         # agent config
-  knowledge/                  # your data as files
-    claude_code/              # Claude Code conversations
-      session-abc123.md
-      session-def456.md
-    claude_code_memory/       # Claude Code memory files
-      memory-project-foo.md
-    gmail/                    # email threads
-      gmail-thread-xyz.md
-    slack/                    # messages
-    ...
-  .auth/                      # encrypted OAuth tokens
-```
-
-Every file is a readable markdown document with YAML frontmatter:
-
-```markdown
----
-source: claude_code
-id: abc123
-synced: 2026-04-06T16:00:00
-timestamp: 2026-04-06T14:30:00
----
-
-## USER
-
-How should we approach the CRE vertical?
-
-## ASSISTANT
-
-The commercial real estate market has five main wedges...
+  config/synesis.yaml          # Configuration
+  knowledge/                   # Raw data as markdown files
+    claude_code/               # Claude Code conversations
+    gmail/                     # Email threads
+    _agent/                    # Agent state
+      rules.md                 # Learned rules
+      preferences.md           # User preferences
+      index.md                 # KB index
+      optimizations.md         # Audit log
+  ml/                          # ML artifacts
+    faiss.index                # FAISS similarity index
+    embeddings.npz             # Cached embedding vectors
+    rule_texts.json            # Rule ID to text mapping
+    scores.json                # UCB1 bandit scores
+    feedback.jsonl             # Accumulated feedback signals
+    reward_model.pkl           # Trained sklearn model
+    config.json                # Best retrieval parameters
+    experiments.jsonl           # Experiment log
 ```
 
 ---
 
-## What gets connected
+## Why not LLM extraction?
+
+Most knowledge tools run an LLM over your data to "extract" structured knowledge. This is wrong:
+
+1. **Lossy.** The LLM decides at sync time what's important. Context that matters later gets discarded.
+2. **Expensive.** Every sync burns API credits.
+3. **Unnecessary.** Agents already know `grep`, `cat`, `tree`. The filesystem is the interface.
+
+Synesis stores raw data and lets agents navigate at query time. The ML layer improves *retrieval* (which rules to surface), not *storage* (what to keep).
+
+---
+
+## Connected sources
 
 | Source | How it syncs | Setup |
 |---|---|---|
 | Claude Code | Reads local files from `~/.claude/` | Automatic |
-| Gmail / Calendar / Drive | OAuth, API calls from your machine | Browser login during setup |
-| Slack | OAuth, API calls from your machine | Browser login during setup |
-| Notion | OAuth, API calls from your machine | Browser login during setup |
-| GitHub | OAuth, API calls from your machine | Browser login during setup |
-| Twitter / X | OAuth, API calls from your machine | Browser login during setup |
-| Linear | OAuth, API calls from your machine | Browser login during setup |
-| Spotify | OAuth, API calls from your machine | Browser login during setup |
+| Gmail / Calendar / Drive | OAuth, API calls from your machine | Browser login |
+| Slack | OAuth, API calls | Browser login |
+| Notion | OAuth, API calls | Browser login |
+| GitHub | OAuth, API calls | Browser login |
+| Twitter / X | OAuth, API calls | Browser login |
+| Linear | OAuth, API calls | Browser login |
+| Spotify | OAuth, API calls | Browser login |
 
-All data stays on your machine. The only network calls are to the source APIs themselves.
+All data stays on your machine.
 
 ---
 
@@ -215,20 +330,7 @@ class MyConnector(BaseConnector):
     def fetch(self, since: str | None = None) -> list[RawConversation]: ...
 ```
 
-Register in `synesis/connectors/__init__.py`. The sync engine writes each returned conversation as a markdown file automatically.
-
-### Project structure
-
-```
-synesis/
-  auth/          # OAuth (PKCE, encrypted token storage)
-  connectors/    # Source plugins
-  kb/            # Types and store utilities
-  config/        # Configuration manager
-  sync/          # Sync engine (raw file writer, no LLM)
-  mcp/           # MCP server (filesystem tools: tree, cat, grep, find, ls)
-  cli.py         # Entry point
-```
+Register in `synesis/connectors/__init__.py`.
 
 ---
 

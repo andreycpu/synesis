@@ -24,8 +24,33 @@ from synesis.sync import SyncEngine
 
 PROJECT_DIR = Path(os.environ.get("SYNESIS_DIR", os.path.expanduser("~/synesis-data")))
 KB_DIR = PROJECT_DIR / "knowledge"
+ML_DIR = PROJECT_DIR / "ml"
 
 mcp = FastMCP("synesis")
+
+# Lazy ML singletons
+_retriever = None
+_ml_available = None
+
+
+def _check_ml() -> bool:
+    global _ml_available
+    if _ml_available is None:
+        try:
+            import sentence_transformers  # noqa: F401
+            import faiss  # noqa: F401
+            _ml_available = True
+        except ImportError:
+            _ml_available = False
+    return _ml_available
+
+
+def _get_retriever():
+    global _retriever
+    if _retriever is None and _check_ml():
+        from synesis.ml.retriever import SemanticRetriever
+        _retriever = SemanticRetriever(ML_DIR, KB_DIR)
+    return _retriever
 
 
 @mcp.tool()
@@ -194,9 +219,13 @@ def write_file(path: str, content: str) -> str:
 
 
 @mcp.tool()
-def orient() -> str:
-    """Call this at session start. Returns the KB index and all learned rules
-    so you can immediately operate with full context."""
+def orient(context: str = "") -> str:
+    """Call this at session start. Returns the KB index and the most relevant
+    learned rules. If ML is available, uses semantic retrieval to rank rules
+    by relevance to the current context. Otherwise falls back to raw rules.
+
+    context: optional description of what this session is about (improves retrieval)
+    """
     parts = []
 
     # KB index
@@ -206,13 +235,27 @@ def orient() -> str:
     else:
         parts.append(generate_index(KB_DIR))
 
-    # Learned rules - these should shape agent behavior
-    rules_path = KB_DIR / "_agent" / "rules.md"
-    if rules_path.exists():
-        rules = rules_path.read_text(encoding="utf-8").strip()
-        if rules:
-            parts.append("\n---\n")
-            parts.append(rules)
+    # Rules: ML-powered retrieval or fallback
+    retriever = _get_retriever()
+    if retriever and context:
+        try:
+            results = retriever.retrieve(query=context, k=10)
+            if results:
+                parts.append("\n---\n")
+                parts.append("# Relevant Rules (ranked by ML)")
+                for r in results:
+                    score_str = f"[score={r['combined']}]"
+                    parts.append(f"- {score_str} {r['text']}")
+        except Exception:
+            retriever = None  # Fall through to raw rules
+
+    if not retriever or not context:
+        rules_path = KB_DIR / "_agent" / "rules.md"
+        if rules_path.exists():
+            rules = rules_path.read_text(encoding="utf-8").strip()
+            if rules:
+                parts.append("\n---\n")
+                parts.append(rules)
 
     # Preferences
     prefs_path = KB_DIR / "_agent" / "preferences.md"
@@ -231,6 +274,73 @@ def learn(rule: str) -> str:
     This gets appended to the agent rules file for future sessions.
     Example: learn('user prefers concise responses over detailed ones')"""
     return append_learning(KB_DIR, rule)
+
+
+@mcp.tool()
+def feedback(signal_type: str, rule_id: str = "", context: str = "", details: str = "") -> str:
+    """Record a feedback signal about a rule or interaction.
+
+    signal_type: 'accepted', 'corrected', 'ignored', 'completed'
+    rule_id: optional ID of the rule this feedback is about
+    context: surrounding text/context for the feedback
+    details: additional JSON details
+    """
+    if not _check_ml():
+        return "ML dependencies not installed. Run: pip install synesis[ml]"
+
+    import json as _json
+    from synesis.ml.feedback import FeedbackExtractor, FeedbackSignal
+    from datetime import datetime
+
+    detail_dict = {}
+    if details:
+        try:
+            detail_dict = _json.loads(details)
+        except _json.JSONDecodeError:
+            detail_dict = {"raw": details}
+
+    signal = FeedbackSignal(
+        timestamp=datetime.now().isoformat(),
+        signal_type=signal_type,
+        rule_id=rule_id or None,
+        context=context,
+        details=detail_dict,
+    )
+
+    extractor = FeedbackExtractor(ML_DIR)
+    extractor.save_feedback([signal])
+    return f"Feedback recorded: {signal_type}"
+
+
+@mcp.tool()
+def train() -> str:
+    """Trigger the ML training loop. Extracts feedback from sessions,
+    retrains the reward model, optimizes retrieval parameters, and
+    consolidates rules. This is the self-improvement cycle."""
+    if not _check_ml():
+        return "ML dependencies not installed. Run: pip install synesis[ml]"
+
+    import json as _json
+    from synesis.ml.trainer import Trainer
+
+    trainer = Trainer(ML_DIR, KB_DIR)
+    result = trainer.run_training_loop()
+    return _json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool()
+def ml_status() -> str:
+    """Show the current state of the ML self-improvement system:
+    rule scores, feedback counts, model accuracy, best parameters."""
+    if not _check_ml():
+        return "ML dependencies not installed. Run: pip install synesis[ml]"
+
+    import json as _json
+    from synesis.ml.trainer import Trainer
+
+    trainer = Trainer(ML_DIR, KB_DIR)
+    status = trainer.get_status()
+    return _json.dumps(status, indent=2, default=str)
 
 
 @mcp.tool()
