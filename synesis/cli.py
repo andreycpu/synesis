@@ -157,6 +157,42 @@ def _show_status():
         click.echo()
 
 
+def _run_train_if_available():
+    """Run the ML training loop silently. Called by the daemon on schedule."""
+    ML_DIR = PROJECT_DIR / "ml"
+    try:
+        from synesis.ml.trainer import Trainer
+    except ImportError:
+        return  # ML deps not installed, skip silently
+
+    _log("training...", "dim")
+    try:
+        trainer = Trainer(ML_DIR, PROJECT_DIR / "knowledge")
+        result = trainer.run_training_loop()
+        steps = result.get("steps", {})
+        fb = steps.get("feedback", {})
+        scoring = steps.get("scoring", {})
+        metrics_step = steps.get("metrics", {})
+
+        parts = [f"{fb.get('new_signals', 0)} new feedback"]
+        parts.append(f"{scoring.get('updates', 0)} score updates")
+        if metrics_step.get("run_number"):
+            parts.append(f"run #{metrics_step['run_number']}")
+
+        # Show trend verdict if available
+        try:
+            from synesis.ml.metrics import MetricsHistory
+            trend = MetricsHistory(ML_DIR).get_trend()
+            if trend.get("verdict"):
+                parts.append(trend["verdict"].lower())
+        except Exception:
+            pass
+
+        _log(f"trained: {', '.join(parts)}", "ok")
+    except Exception as e:
+        _log(f"training failed: {e}", "err")
+
+
 @click.group(invoke_without_command=True)
 @click.version_option("0.1.0")
 @click.pass_context
@@ -181,6 +217,8 @@ def cli(ctx):
     config = config_manager.load()
     schedule = config.get("sync_schedule", "0 */12 * * *")
 
+    train_schedule = config.get("train_schedule", "0 0 * * *")  # daily at midnight
+
     # Sync immediately
     _log("syncing...")
     try:
@@ -190,29 +228,50 @@ def cli(ctx):
     except Exception as e:
         _log(f"sync failed: {e}", "err")
 
+    # Train immediately on first run if ML is available
+    _run_train_if_available()
+
     _show_status()
 
     # Run forever
-    cron = croniter(schedule)
-    next_time = datetime.fromtimestamp(cron.get_next(float)).strftime("%H:%M")
-    _log(f"running. next sync at {next_time}", "dim")
+    sync_cron = croniter(schedule)
+    train_cron = croniter(train_schedule)
+
+    next_sync = sync_cron.get_next(float)
+    next_train = train_cron.get_next(float)
+
+    _log(f"running. sync: every {schedule} | train: every {train_schedule}", "dim")
+    _log(f"next sync at {datetime.fromtimestamp(next_sync).strftime('%H:%M')} | "
+         f"next train at {datetime.fromtimestamp(next_train).strftime('%H:%M')}", "dim")
 
     try:
         while True:
-            next_run = cron.get_next(float)
-            time.sleep(max(0, next_run - time.time()))
+            # Sleep until whichever comes first
+            next_event = min(next_sync, next_train)
+            time.sleep(max(0, next_event - time.time()))
 
-            _log("syncing...")
-            try:
-                fresh = SyncEngine(str(PROJECT_DIR))
-                result = fresh.run()
-                _log(f"done: {result['entries']} files", "ok")
-            except Exception as e:
-                _log(f"sync failed: {e}", "err")
+            now = time.time()
 
-            cron = croniter(schedule)
-            next_time = datetime.fromtimestamp(cron.get_next(float)).strftime("%H:%M")
-            _log(f"next sync at {next_time}", "dim")
+            # Run sync if it's time
+            if now >= next_sync:
+                _log("syncing...")
+                try:
+                    fresh = SyncEngine(str(PROJECT_DIR))
+                    result = fresh.run()
+                    _log(f"done: {result['entries']} files", "ok")
+                except Exception as e:
+                    _log(f"sync failed: {e}", "err")
+                sync_cron = croniter(schedule)
+                next_sync = sync_cron.get_next(float)
+
+            # Run training if it's time
+            if now >= next_train:
+                _run_train_if_available()
+                train_cron = croniter(train_schedule)
+                next_train = train_cron.get_next(float)
+
+            _log(f"next sync: {datetime.fromtimestamp(next_sync).strftime('%H:%M')} | "
+                 f"next train: {datetime.fromtimestamp(next_train).strftime('%H:%M')}", "dim")
     except KeyboardInterrupt:
         click.echo()
         _log("stopped", "dim")
