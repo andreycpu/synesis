@@ -1,14 +1,18 @@
 """Feedback extraction from session data.
 
 No LLM calls. Extracts signals using structural analysis of conversations.
-Attributes feedback to specific rules by detecting rule content in assistant messages.
 
-Key design decisions:
-- Attribution works by matching rule text from _agent/rules.md against assistant responses.
-  If the assistant message contains content that matches a known rule, the feedback signal
-  gets that rule's ID. This is direct attribution, not embedding guesswork.
-- Session dedup via processed_sessions.json prevents duplicate extraction.
-- Confidence scoring reduces false positives from broad pattern matching.
+Attribution strategy (layered, in priority order):
+1. RETRIEVAL LEDGER (ground truth): The retriever logs which rules were served
+   and when to retrieval_ledger.jsonl. If a feedback signal's timestamp falls
+   within a session window that had ledger entries, those rules are attributed.
+   This is exact - we know what was served.
+2. TEXT MATCHING (fallback): If no ledger data exists for the time window,
+   fall back to checking if rule content words appear in the assistant response.
+   This catches sessions before the ledger existed or where orient() wasn't called.
+
+Session dedup via processed_sessions.json prevents duplicate extraction.
+Confidence scoring reduces false positives from broad pattern matching.
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import json
 import re
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -90,6 +94,7 @@ class FeedbackSignal:
     context: str
     details: dict
     session_hash: str = ""
+    attribution_source: str = ""  # "ledger", "text_match", ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -103,6 +108,8 @@ class FeedbackSignal:
             d["confidence"] = 0.5
         if "session_hash" not in d:
             d["session_hash"] = ""
+        if "attribution_source" not in d:
+            d["attribution_source"] = ""
         return cls(**d)
 
 
@@ -112,11 +119,70 @@ class FeedbackExtractor:
         self._kb_dir = kb_dir
         self._feedback_path = ml_dir / "feedback.jsonl"
         self._processed_path = ml_dir / "processed_sessions.json"
+        self._ledger_path = ml_dir / "retrieval_ledger.jsonl"
         ml_dir.mkdir(parents=True, exist_ok=True)
         self._rules_cache: list[tuple[str, str]] | None = None
+        self._ledger_cache: list[dict] | None = None
+
+    # ---- Retrieval ledger (ground truth attribution) ----
+
+    def _load_ledger(self) -> list[dict]:
+        """Load the retrieval ledger. Each entry has timestamp + rule_ids."""
+        if self._ledger_cache is not None:
+            return self._ledger_cache
+
+        if not self._ledger_path.exists():
+            self._ledger_cache = []
+            return self._ledger_cache
+
+        entries = []
+        for line in self._ledger_path.read_text(encoding="utf-8").strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                continue
+
+        self._ledger_cache = entries
+        return entries
+
+    def _attribute_from_ledger(self, signal_timestamp: str, window_minutes: int = 30) -> list[str]:
+        """Find which rules were served near a feedback signal's timestamp.
+
+        Looks at the retrieval ledger for entries within window_minutes of
+        the signal. Returns the union of all rule_ids that were served.
+        This is ground truth - the retriever logged exactly what it served.
+        """
+        ledger = self._load_ledger()
+        if not ledger:
+            return []
+
+        try:
+            signal_dt = datetime.fromisoformat(signal_timestamp)
+        except Exception:
+            return []
+
+        window = timedelta(minutes=window_minutes)
+        rule_ids = set()
+
+        for entry in ledger:
+            try:
+                entry_dt = datetime.fromisoformat(entry["timestamp"])
+            except Exception:
+                continue
+
+            # Ledger entry must be BEFORE the feedback (rules served, then user reacted)
+            # and within the window
+            diff = signal_dt - entry_dt
+            if timedelta(0) <= diff <= window:
+                rule_ids.update(entry.get("rule_ids", []))
+
+        return list(rule_ids)
+
+    # ---- Text matching (fallback attribution) ----
 
     def _load_rules(self) -> list[tuple[str, str]]:
-        """Load rules from _agent/rules.md. Returns [(rule_id, rule_text), ...]."""
         if self._rules_cache is not None:
             return self._rules_cache
 
@@ -143,12 +209,7 @@ class FeedbackExtractor:
         return rules
 
     def _match_rules_in_text(self, assistant_text: str) -> list[str]:
-        """Find which rules appear in an assistant message.
-
-        Matches by checking if significant words from the rule appear in
-        the assistant response. A rule matches if 60%+ of its content words
-        (4+ chars) appear in the assistant text.
-        """
+        """Fallback: find which rules appear in an assistant message via word overlap."""
         if not assistant_text:
             return []
 
@@ -164,7 +225,6 @@ class FeedbackExtractor:
             if not rule_words:
                 continue
 
-            # Count how many rule words appear in the assistant text
             hits = sum(1 for w in rule_words if w in assistant_lower)
             coverage = hits / len(rule_words)
 
@@ -173,12 +233,14 @@ class FeedbackExtractor:
 
         return matched_ids
 
+    # ---- Extraction ----
+
     def extract_from_session(self, session_path: Path) -> list[FeedbackSignal]:
         """Extract feedback signals from a JSONL conversation file.
 
-        Attribution: parses assistant messages for rule content from _agent/rules.md.
-        When a user correction/acceptance follows an assistant message containing
-        rule-derived content, the feedback signal gets that rule's ID.
+        Attribution priority:
+        1. Check retrieval ledger for rules served near the signal's timestamp
+        2. Fall back to text matching if no ledger data
         """
         signals = []
         messages = self._parse_session(session_path)
@@ -202,9 +264,18 @@ class FeedbackExtractor:
 
             signal = self._classify_message(user_text, assistant_text, curr, session_hash)
             if signal:
-                # Attribute to specific rules found in the assistant response
-                matched_rule_ids = self._match_rules_in_text(assistant_text)
-                signal.rule_ids = matched_rule_ids
+                # Layer 1: Try ledger-based attribution (ground truth)
+                ledger_rules = self._attribute_from_ledger(signal.timestamp)
+                if ledger_rules:
+                    signal.rule_ids = ledger_rules
+                    signal.attribution_source = "ledger"
+                else:
+                    # Layer 2: Fall back to text matching
+                    text_rules = self._match_rules_in_text(assistant_text)
+                    if text_rules:
+                        signal.rule_ids = text_rules
+                        signal.attribution_source = "text_match"
+
                 signals.append(signal)
 
         return signals
@@ -212,7 +283,6 @@ class FeedbackExtractor:
     def _classify_message(
         self, user_text: str, assistant_text: str, msg: dict, session_hash: str
     ) -> FeedbackSignal | None:
-        """Classify a user message as feedback with confidence scoring."""
         strong_corrections = sum(1 for p in STRONG_CORRECTION if p.search(user_text))
         weak_corrections = sum(1 for p in WEAK_CORRECTION if p.search(user_text))
         correction_score = strong_corrections * 0.4 + weak_corrections * 0.15
@@ -243,7 +313,7 @@ class FeedbackExtractor:
                 timestamp=msg.get("timestamp", datetime.now().isoformat()),
                 signal_type="corrected",
                 confidence=round(min(correction_score, 1.0), 3),
-                rule_ids=[],  # filled by caller
+                rule_ids=[],
                 context=assistant_text[:500],
                 details={
                     "user_message": user_text[:500],
@@ -257,7 +327,7 @@ class FeedbackExtractor:
                 timestamp=msg.get("timestamp", datetime.now().isoformat()),
                 signal_type="accepted",
                 confidence=round(min(positive_score, 1.0), 3),
-                rule_ids=[],  # filled by caller
+                rule_ids=[],
                 context=assistant_text[:500],
                 details={
                     "user_message": user_text[:500],
@@ -270,7 +340,6 @@ class FeedbackExtractor:
         return None
 
     def extract_from_directory(self, sessions_dir: Path) -> list[FeedbackSignal]:
-        """Process JSONL session files, skipping already-processed ones."""
         processed = self._load_processed()
         all_signals = []
 
@@ -316,7 +385,6 @@ class FeedbackExtractor:
         return sum(1 for line in self._feedback_path.read_text().strip().split("\n") if line.strip())
 
     def _parse_session(self, path: Path) -> list[dict]:
-        """Parse a JSONL conversation file into message dicts."""
         messages = []
         for line in path.read_text(encoding="utf-8").strip().split("\n"):
             if not line.strip():
@@ -342,7 +410,6 @@ class FeedbackExtractor:
         return messages
 
     def _extract_text(self, entry: dict) -> str:
-        """Extract text from the nested message structure."""
         msg = entry.get("message", {})
         if isinstance(msg, dict):
             inner = msg.get("message", msg)

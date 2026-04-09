@@ -252,9 +252,14 @@ def train_cmd():
 
     fb = steps.get("feedback", {})
     _log(f"feedback: {fb.get('new_signals', 0)} new, {fb.get('total_feedback', 0)} total (avg confidence: {fb.get('avg_confidence', 0):.2f})", "ok")
+    ledger = fb.get("attribution_via_ledger", 0)
+    text = fb.get("attribution_via_text", 0)
+    unattr = fb.get("unattributed", 0)
+    if fb.get("new_signals", 0) > 0:
+        _log(f"  attribution: {ledger} via ledger, {text} via text match, {unattr} unattributed", "dim")
 
     scoring = steps.get("scoring", {})
-    _log(f"scores: {scoring.get('updates', 0)} updates ({scoring.get('attributed_signals', 0)} attributed, {scoring.get('unattributed_signals', 0)} unattributed)", "ok")
+    _log(f"scores: {scoring.get('updates', 0)} updates", "ok")
 
     # Staleness
     stale = steps.get("staleness", {})
@@ -299,6 +304,25 @@ def train_cmd():
         _log("discovered patterns:", "warn")
         for p in consol["new_patterns"]:
             click.echo(f"    {p}")
+
+    # Metrics snapshot
+    metrics_step = steps.get("metrics", {})
+    if metrics_step.get("run_number"):
+        _log(f"metrics: run #{metrics_step['run_number']}, attribution rate: {metrics_step.get('attribution_rate', 0):.1%}", "ok")
+        sources = metrics_step.get("attribution_sources", {})
+        if sources:
+            _log(f"  cumulative attribution: {sources.get('ledger', 0)} ledger, {sources.get('text_match', 0)} text, {sources.get('none', 0)} unattributed", "dim")
+
+    # Show trend if we have enough data
+    try:
+        from synesis.ml.metrics import MetricsHistory
+        trend = MetricsHistory(ML_DIR).get_trend()
+        if trend.get("verdict"):
+            verdict = trend["verdict"]
+            color = "ok" if verdict == "COMPOUNDING" else ("warn" if verdict == "STABLE" else "err")
+            _log(f"loop health: {verdict} (across {trend['runs_analyzed']} runs)", color)
+    except Exception:
+        pass
 
     click.echo()
     _log("training complete", "ok")

@@ -59,6 +59,9 @@ class Trainer:
         new_signals = extractor.extract_from_directory(sessions_dir)
         saved = extractor.save_feedback(new_signals)
         all_feedback = extractor.load_feedback()
+        ledger_attributed = sum(1 for s in new_signals if s.attribution_source == "ledger")
+        text_attributed = sum(1 for s in new_signals if s.attribution_source == "text_match")
+        unattributed = sum(1 for s in new_signals if not s.rule_ids)
         summary["steps"]["feedback"] = {
             "new_signals": saved,
             "total_feedback": len(all_feedback),
@@ -66,8 +69,10 @@ class Trainer:
             "avg_confidence": round(
                 sum(f.confidence for f in all_feedback) / max(len(all_feedback), 1), 3
             ),
-            "attributed": sum(1 for s in new_signals if s.rule_ids),
-            "unattributed": sum(1 for s in new_signals if not s.rule_ids),
+            "attributed": ledger_attributed + text_attributed,
+            "attribution_via_ledger": ledger_attributed,
+            "attribution_via_text": text_attributed,
+            "unattributed": unattributed,
         }
 
         # Step 2: Update scorer with attributed, confidence-weighted feedback
@@ -194,6 +199,20 @@ class Trainer:
             logger.info("Step 9: Rebuilding rule index after consolidation...")
             n_rules = retriever.index_rules()
             summary["steps"]["reindex"] = {"rules_indexed": n_rules}
+
+        # Step 10: Record metrics snapshot
+        logger.info("Step 10: Recording metrics snapshot...")
+        try:
+            from synesis.ml.metrics import MetricsHistory
+            metrics = MetricsHistory(self._ml_dir)
+            snapshot = metrics.record_snapshot(summary)
+            summary["steps"]["metrics"] = {
+                "run_number": snapshot["run_number"],
+                "attribution_rate": snapshot["attribution_rate"],
+                "attribution_sources": snapshot["attribution_sources"],
+            }
+        except Exception as e:
+            logger.warning(f"Metrics recording failed: {e}")
 
         logger.info("Training loop complete.")
         return summary

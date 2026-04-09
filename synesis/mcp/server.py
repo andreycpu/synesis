@@ -486,6 +486,56 @@ def review_stale_rules() -> str:
 
 
 @mcp.tool()
+def metrics_trend() -> str:
+    """Show whether the self-improvement loop is actually compounding.
+
+    Compares key metrics across training runs: attribution rate, confidence,
+    retrieval accuracy, reward model accuracy, stale rules count.
+    Gives a verdict: COMPOUNDING, STABLE, or DEGRADING.
+
+    Run synesis train multiple times over days/weeks, then call this to see
+    if the system is genuinely getting better.
+    """
+    if not _check_ml():
+        return "ML dependencies not installed. Run: pip install synesis[ml]"
+
+    import json as _json
+    from synesis.ml.metrics import MetricsHistory
+
+    metrics = MetricsHistory(ML_DIR)
+    trend = metrics.get_trend()
+
+    if trend.get("status") == "insufficient_data":
+        return f"Need at least 2 training runs. Currently have {trend['runs']}. Run `synesis train` again."
+
+    lines = [f"## Loop Health: {trend['verdict']}", ""]
+    lines.append(f"Runs analyzed: {trend['runs_analyzed']} ({trend['first_run']} to {trend['latest_run']})")
+    lines.append("")
+
+    for name, data in trend.get("metrics", {}).items():
+        arrow = {"improving": "+", "declining": "-", "stable": "=", "no_data": "?"}
+        t = data["trend"]
+        curr = data["current"]
+        base = data["baseline"]
+        curr_str = f"{curr:.3f}" if isinstance(curr, float) else str(curr)
+        base_str = f"{base:.3f}" if isinstance(base, float) else str(base)
+        lines.append(f"  [{arrow[t]}] {name}: {base_str} -> {curr_str} ({t})")
+
+    # Show attribution source breakdown
+    history = metrics.get_history()
+    if history:
+        latest = history[-1]
+        sources = latest.get("attribution_sources", {})
+        if sources:
+            lines.append("")
+            lines.append("Attribution sources (latest run):")
+            for source, count in sorted(sources.items()):
+                lines.append(f"  {source}: {count}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def sync() -> str:
     """Trigger a sync cycle to pull new data from connected sources."""
     engine = SyncEngine(str(PROJECT_DIR))
