@@ -251,10 +251,30 @@ def train_cmd():
     steps = result.get("steps", {})
 
     fb = steps.get("feedback", {})
-    _log(f"feedback: {fb.get('new_signals', 0)} new, {fb.get('total_feedback', 0)} total", "ok")
+    _log(f"feedback: {fb.get('new_signals', 0)} new, {fb.get('total_feedback', 0)} total (avg confidence: {fb.get('avg_confidence', 0):.2f})", "ok")
 
     scoring = steps.get("scoring", {})
-    _log(f"scores updated: {scoring.get('updates', 0)}", "ok")
+    _log(f"scores: {scoring.get('updates', 0)} updates ({scoring.get('attributed_signals', 0)} attributed, {scoring.get('unattributed_signals', 0)} unattributed)", "ok")
+
+    # Staleness
+    stale = steps.get("staleness", {})
+    if stale.get("error"):
+        _log(f"staleness: error - {stale['error']}", "err")
+    else:
+        _log(f"staleness: {stale.get('stale_rules_found', 0)} stale rules, {stale.get('scores_reduced', 0)} penalized", "ok")
+        for s in stale.get("top_stale", []):
+            _log(f"  [{s['reason']}] {s['text']}", "dim")
+
+    # Contradictions
+    contra = steps.get("contradictions", {})
+    if contra.get("error"):
+        _log(f"contradictions: error - {contra['error']}", "err")
+    elif contra.get("found", 0) > 0:
+        _log(f"contradictions: {contra['found']} found, {contra.get('resolved', 0)} resolved, {contra.get('flagged_for_review', 0)} flagged", "warn")
+        for c in contra.get("details", []):
+            _log(f"  \"{c['a']}\" vs \"{c['b']}\" -> {c['resolution']}", "dim")
+    else:
+        _log("contradictions: none found", "ok")
 
     indexing = steps.get("indexing", {})
     _log(f"rules indexed: {indexing.get('rules_indexed', 0)}", "ok")
@@ -302,7 +322,8 @@ def status_cmd():
     status = trainer.get_status()
 
     _log(f"rules scored: {status.get('n_rules_scored', 0)}", "ok")
-    _log(f"feedback signals: {status.get('n_feedback', 0)}", "ok")
+    _log(f"feedback signals: {status.get('n_feedback', 0)} ({status.get('n_attributed', 0)} attributed)", "ok")
+    _log(f"avg confidence: {status.get('avg_confidence', 0):.2f}", "ok")
 
     by_type = status.get("feedback_by_type", {})
     if by_type:

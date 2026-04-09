@@ -302,7 +302,8 @@ def feedback(signal_type: str, rule_id: str = "", context: str = "", details: st
     signal = FeedbackSignal(
         timestamp=datetime.now().isoformat(),
         signal_type=signal_type,
-        rule_id=rule_id or None,
+        confidence=1.0,  # Explicit feedback from agent = high confidence
+        rule_ids=[rule_id] if rule_id else [],
         context=context,
         details=detail_dict,
     )

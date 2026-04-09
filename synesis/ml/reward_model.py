@@ -96,7 +96,7 @@ class RewardModel:
 
             # Use the rule text if available, otherwise use context as proxy
             rule_text = signal.details.get("rule_text", context[:200])
-            score_data = scorer.get_score_data(signal.rule_id) if signal.rule_id else None
+            score_data = scorer.get_score_data(signal.rule_ids[0]) if signal.rule_ids else None
 
             try:
                 features = self.featurize(rule_text, context, score_data)

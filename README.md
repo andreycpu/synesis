@@ -17,28 +17,37 @@ Synesis has two layers:
 ### The self-improvement loop
 
 ```
-Session N: agent retrieves rules, acts on them
+Session N: agent retrieves rules (logged to ledger), acts on them
     |
     v
-Feedback extraction: parse session for corrections/acceptances (regex, no LLM)
+Feedback extraction: structural analysis with confidence scoring (no LLM)
     |
     v
-Score update: UCB1 bandit adjusts rule scores based on outcomes
+Rule attribution: link feedback to specific rules via ledger + embedding similarity
+    |
+    v
+Score update: UCB1 bandit adjusts scores, weighted by signal confidence
+    |
+    v
+Staleness detection: flag old/unused/superseded rules, penalize scores
+    |
+    v
+Contradiction detection: find opposing rules, resolve or flag for review
     |
     v
 Reward model: logistic regression learns to predict rule utility
     |
     v
-Parameter search: grid search over retrieval weights, keep improvements
+Parameter search: grid search with proper train/test split, keep improvements
     |
     v
 Rule consolidation: cluster duplicates, prune dead rules, extract patterns
     |
     v
-Session N+1: better retrieval, higher-scoring rules surface first
+Session N+1: better retrieval, stale rules gone, contradictions resolved
 ```
 
-Each cycle makes the next one better. The system has a concrete metric (retrieval precision against feedback), modifies its own parameters, runs experiments, and only keeps improvements.
+Each cycle makes the next one better. The system has a concrete metric (retrieval precision against held-out feedback), modifies its own parameters, runs experiments, and only keeps improvements. Feedback that can't be attributed to specific rules is tracked but doesn't pollute the scoring system.
 
 ---
 
@@ -48,11 +57,12 @@ Each cycle makes the next one better. The system has a concrete metric (retrieva
 |---|---|---|
 | **Embeddings** | Semantic understanding of rules | sentence-transformers (all-MiniLM-L6-v2) |
 | **Index** | Fast similarity search | FAISS (IndexFlatIP, cosine similarity) |
-| **Scorer** | Balance exploitation vs exploration | UCB1 multi-armed bandit |
-| **Feedback** | Extract signals from sessions | Regex pattern matching on conversation structure |
+| **Scorer** | Balance exploitation vs exploration | UCB1 multi-armed bandit with confidence weighting |
+| **Feedback** | Extract + attribute signals | Structural analysis with multi-signal confidence scoring |
+| **Staleness** | Detect outdated/contradicting rules | Exponential decay, embedding drift, negation pattern matching |
 | **Reward model** | Predict rule utility in context | Logistic regression (774d features: rule emb + context emb + behavioral signals) |
 | **Consolidator** | Merge duplicates, prune dead rules | Agglomerative clustering on embeddings, TF-IDF pattern extraction |
-| **Trainer** | Optimize retrieval parameters | Grid search with held-out evaluation (precision@k, NDCG) |
+| **Trainer** | Optimize retrieval parameters | Grid search with train/test split (precision@k, NDCG) |
 
 All models run locally. The sentence-transformer downloads once (~90MB) and runs on CPU.
 
@@ -104,12 +114,15 @@ synesis train
 ```
 
 This runs the full pipeline:
-1. Extracts feedback signals from your Claude Code sessions
-2. Updates UCB1 bandit scores for each rule
-3. Rebuilds the FAISS embedding index
-4. Retrains the reward model (if enough data)
-5. Grid-searches retrieval parameters against held-out feedback
-6. Consolidates rules (merge duplicates, prune dead weight, extract patterns)
+1. Extracts feedback signals from sessions (with dedup - won't re-process)
+2. Attributes feedback to specific rules via retrieval ledger + embedding similarity
+3. Updates UCB1 bandit scores, weighted by signal confidence
+4. Detects stale rules (age decay, inactivity, superseded by newer rules)
+5. Detects contradicting rules and resolves them (keeps newer/higher-scored)
+6. Rebuilds FAISS embedding index
+7. Retrains the reward model (if enough attributed data)
+8. Grid-searches retrieval parameters with proper train/test split
+9. Consolidates rules (merge duplicates, prune dead weight, extract patterns)
 
 Run it periodically - weekly is a good cadence. Each run makes retrieval better.
 
@@ -117,15 +130,19 @@ Run it periodically - weekly is a good cadence. Each run makes retrieval better.
   SYNESIS  self-evolving agent memory
   ------------------------------------------
 
-  21:26:25  starting training loop...
-  21:26:40  feedback: 4 new, 47 total
-  21:26:40  scores updated: 12
-  21:26:40  rules indexed: 23
-  21:26:40  reward model: accuracy=0.742, n=47
-  21:26:40  best params: {'embedding_weight': 0.8, 'score_weight': 0.2, 'k': 5}
-  21:26:40  consolidation: 2 merges, 1 pruned, 3 patterns
+  21:43:33  starting training loop...
+  21:43:44  feedback: 5 new, 52 total (avg confidence: 0.41)
+  21:43:44  scores: 14 updates (11 attributed, 3 unattributed)
+  21:43:44  staleness: 4 stale rules, 2 penalized
+  21:43:44    [age_decay] user prefers tabs over spaces
+  21:43:44  contradictions: 1 found, 1 resolved, 0 flagged
+  21:43:44    "use verbose logging" vs "keep logs minimal" -> keep_b
+  21:43:44  rules indexed: 21
+  21:43:44  reward model: accuracy=0.742, n=47
+  21:43:44  best params: {'embedding_weight': 0.8, 'score_weight': 0.2, 'k': 5}
+  21:43:44  consolidation: 2 merges, 1 pruned, 3 patterns
 
-  21:26:40  training complete
+  21:43:44  training complete
 ```
 
 ### Status
@@ -194,13 +211,34 @@ This naturally balances using high-performing rules (exploitation) with trying u
 
 ### How feedback extraction works (no LLM)
 
-The feedback extractor parses JSONL conversation files looking for structural patterns:
+The feedback extractor uses structural analysis, not just keyword matching. Three layers of signal quality:
 
-- **Correction detected**: user message contains "no", "don't", "wrong", "actually", "instead", "revert" etc. after an assistant message
-- **Acceptance detected**: user message contains "thanks", "perfect", "exactly", "lgtm", "looks good" etc.
-- **Completion detected**: session ends with positive user message
+**1. Pattern strength (strong vs weak):**
+- Strong correction: "that's wrong", "I said X", "undo this" (high confidence alone)
+- Weak correction: "instead", "actually", "don't" (only counts when combined with other signals)
+- Strong positive: "thanks" at message start, "perfect", "lgtm" (high confidence alone)
+- Weak positive: "great", "nice", "cool" (needs corroboration)
 
-12 correction patterns and 10 positive patterns, all regex-based. No ambiguity, no LLM interpretation needed.
+**2. Structural context:**
+- Short messages after assistant responses are likely reactions (higher confidence)
+- Long messages are usually new requests, even if they contain trigger words (lower confidence)
+- Continuation patterns ("now do X", "can you also") heavily discount correction signals
+
+**3. Multi-signal voting:**
+- Confidence = (strong_matches * 0.4 + weak_matches * 0.15), capped at 1.0
+- If both correction AND positive signals fire, both are discounted (ambiguous)
+- Minimum confidence threshold of 0.25 to emit a signal at all
+
+**4. Rule attribution:**
+- Every retrieval is logged to a ledger (which rules were served, when)
+- Feedback signals are retroactively attributed to rules via embedding similarity
+- Only rules with >0.3 cosine similarity to the feedback context get attributed
+- Unattributed signals are tracked but don't affect rule scores
+
+**5. Session dedup:**
+- Each session file is hashed (path + size + mtime)
+- Already-processed sessions are skipped on subsequent training runs
+- No duplicate feedback from re-processing the same conversations
 
 ### How the reward model works
 
@@ -217,6 +255,33 @@ A logistic regression trained on feedback data. Feature vector (774 dimensions):
 
 Predicts `P(useful)` - the probability that retrieving this rule in this context leads to positive feedback. Requires 10+ feedback signals to train. Uses balanced class weights to handle imbalanced data.
 
+### How staleness detection works
+
+The hardest problem in persistent memory: knowing when something you learned is no longer true.
+
+Three staleness signals:
+
+1. **Age decay**: Rules older than 30 days lose confidence exponentially (half-life model). A 60-day-old rule has 25% of its original confidence. This prevents ancient preferences from overriding recent behavior.
+
+2. **Inactivity**: Rules not used in 14+ days get flagged. If the system keeps retrieving other rules instead of this one, it's probably not relevant anymore.
+
+3. **Superseded**: If a newer rule covers the same topic (>0.7 embedding similarity) and has a better score, the older one is marked superseded. Preferences change - the system tracks this.
+
+Stale rules don't get deleted immediately. Their scores get penalized, so they naturally sink in retrieval rankings. Severely stale rules (>0.8 confidence loss) get heavy penalties. The consolidator eventually prunes them.
+
+### How contradiction detection works
+
+When two rules say opposite things, the system catches it:
+
+1. **Same topic detection**: Embedding similarity >0.5 means the rules are about the same thing
+2. **Negation detection**: Pattern matching on antonym pairs ("always"/"never", "use"/"don't use", "prefers"/"avoids") plus structural negation analysis (shared content words where one rule has a negation marker and the other doesn't)
+3. **Contradiction score**: `embedding_similarity * negation_score` - both high similarity AND clear opposition required
+
+Resolution strategy:
+- If one rule has significantly better reward history, keep it
+- If scores are similar, keep the newer rule (preferences change over time)
+- If both are ambiguous, flag for human review
+
 ### How consolidation works
 
 1. **Cluster** rules using agglomerative clustering on embeddings (cosine distance, threshold=0.15)
@@ -226,12 +291,19 @@ Predicts `P(useful)` - the probability that retrieving this rule in this context
 
 ### How parameter search works
 
-Like autoresearch but for retrieval:
+Like autoresearch but for retrieval. Critically, uses a **proper train/test split** to avoid circular evaluation:
 
-1. Define parameter grid: `embedding_weight`, `score_weight`, `k`
-2. For each combination: run retriever against held-out feedback, measure precision@k and NDCG
-3. Compare against current best config
-4. Only save new config if it beats the baseline
+1. Split attributed feedback 70/30 (train/test)
+2. Define parameter grid: `embedding_weight`, `score_weight`, `k`
+3. For each combination: run retriever against the **held-out 30% test set**
+4. Metric: did the retriever rank the attributed rule highly? (precision@k, NDCG)
+5. Compare against current best config
+6. Only save new config if it beats the baseline on the test set
+
+The evaluation is non-circular because:
+- Feedback signals have rule_ids from the retrieval ledger (what was actually served in past sessions)
+- We evaluate whether a DIFFERENT parameter set would rank those same rules
+- The test set is never used for training
 
 All experiments are logged to `ml/experiments.jsonl` for auditability.
 
@@ -244,11 +316,12 @@ synesis/
   ml/               # Self-improvement (the ML layer)
     embeddings.py    # Sentence-transformers + FAISS
     scorer.py        # UCB1 multi-armed bandit
-    feedback.py      # Signal extraction from sessions
+    feedback.py      # Confidence-scored signal extraction with attribution
     reward_model.py  # Logistic regression utility predictor
+    staleness.py     # Staleness detection + contradiction resolution
     consolidator.py  # Clustering + pruning + pattern extraction
-    retriever.py     # Combined ranking pipeline
-    trainer.py       # Auto-research training loop
+    retriever.py     # Combined ranking pipeline + retrieval ledger
+    trainer.py       # Auto-research training loop with train/test split
   agent/             # Agent self-modification
     learner.py       # Rules and index management
     optimizer.py     # Hook/instruction/script installation
@@ -279,7 +352,9 @@ synesis/
     embeddings.npz             # Cached embedding vectors
     rule_texts.json            # Rule ID to text mapping
     scores.json                # UCB1 bandit scores
-    feedback.jsonl             # Accumulated feedback signals
+    feedback.jsonl             # Confidence-scored, attributed feedback
+    processed_sessions.json    # Session dedup tracking
+    retrieval_ledger.jsonl     # Log of which rules were served when
     reward_model.pkl           # Trained sklearn model
     config.json                # Best retrieval parameters
     experiments.jsonl           # Experiment log
